@@ -126,6 +126,13 @@ model User {
   deviceToken    String? // FCM device token for push notifications
   kycStatus      KycStatus @default(PENDING)
   kycDocumentKey String? // Azure Blob Storage key; POPIA: never the raw document
+  // Notification preferences (account-service GET/PUT /account/preferences).
+  // MVP: email + SMS are dispatched regardless (toggle UI is scaffold), but the
+  // stored values back the Notification Preferences screen scaffold.
+  smsEnabled         Boolean @default(true)
+  pushEnabled        Boolean @default(true)
+  emailEnabled       Boolean @default(true)
+  preferredLanguage  String  @default("en") // one of en | zu | af | st
   deletedAt      DateTime? // DECISION-A: soft-delete; PII anonymised on erasure
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt

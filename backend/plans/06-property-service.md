@@ -27,64 +27,55 @@ sections of the flow walkthrough in plan/07.
 data covers all four Figma FIND PROPERTY branches; adapter interface confirmed
 swappable without route handler changes; integration smoke passes.
 
+> **⚠️ Canonical-contract note (2026-06-27).** This plan predates the sealed
+> `system-design/api/property-service.md`. The contract supersedes it: routes are
+> `POST /property/search/account`, `POST /property/search/address`, `GET /property/:id`
+> (NOT a singular `GET /property?accountNumber=`); no-result is **200 + null/[]**, never
+> 404 (ADR-004); an identity gate (`user.idNumberHash ∈ property.holderIdNumberHashes`,
+> ADR-003) gates every result; there is **no `AuditLog` table** in the migrated schema.
+> The adapter-interface tasks (T1/T2) were a pre-Prisma abstraction; the service is
+> Prisma-backed directly via the `@easyrates/db` singleton (one shared client, no per-route
+> `new PrismaClient`). Tasks below are reconciled to the contract.
+
 ## Tasks
 
-- [ ] ⚠️ T1  Write the property adapter interface at
-  `easy_rates/backend/shared/adapters/property-adapter.ts`:
-  ```ts
-  export interface PropertyRecord {
-    id: string
-    accountNumber: string
-    address: string
-    erfNumber: string
-    ownerName: string
-    city: string
-    metadata: Record<string, unknown>
-  }
+- [x] ❌ DESCOPED T1  Standalone `PropertyAdapter` interface file. Canonical equivalent:
+  the service is Prisma-backed directly through the shared `@easyrates/db` singleton
+  (no service instantiates its own client). Route handlers in `apps/property/src/app.ts`
+  use the singleton; pure mapping/gate logic is isolated in `apps/property/src/mappers.ts`
+  (unit-tested) rather than behind an adapter facade.
 
-  export interface PropertyAdapter {
-    findByAccountNumber(accountNumber: string): Promise<PropertyRecord | null>
-    search(query: string): Promise<PropertyRecord[]>
-  }
-  ```
-  Route handlers import only this interface — never the Prisma client directly.
-  Done when: interface file exists; no route handler imports PrismaClient.
+- [x] ❌ DESCOPED T2  `property-adapter.prisma.ts`. Canonical equivalent: queries live in
+  `apps/property/src/app.ts` against the `@easyrates/db` singleton
+  (`prisma.property.findUnique/findMany`, `contains … mode:"insensitive"` for `q`,
+  exact normalized `equals` for `erfNumber` per ADR-005).
 
-- [ ] ⚠️ T2  Write the Prisma-backed implementation at
-  `easy_rates/backend/shared/adapters/property-adapter.prisma.ts`:
-  - `findByAccountNumber`: `prisma.property.findUnique({ where: { accountNumber } })`
-  - `search`: `prisma.property.findMany({ where: { OR: [
-      { address: { contains: query, mode: 'insensitive' } },
-      { erfNumber: { contains: query, mode: 'insensitive' } }
-    ]}})`
-  Wire this implementation into the property-service via dependency injection
-  or a factory function — one file to change to swap in the real source.
-  Done when: implementation compiles; grep for "new PrismaClient" in
-  `services/property-service/` returns zero results.
+- [x] ✅ T3  Account lookup — ✓ verified. `POST /property/search/account`
+  (`apps/property/src/app.ts`): Zod 8-digit gate (`^\d{8}$`) → 400 `validation_error`;
+  identity-gated `prisma.property.findUnique`; **200 + `{property:…}`** on a gate hit,
+  **200 + `{property:null}`** on no-match OR gate miss (byte-identical, ADR-004) — never
+  404. AuditLog write DESCOPED (no such table in the migrated schema).
+  ✓ smoke: `10045821` → 200 + full summary (ward from metadata); `99999999` → `200 {property:null}`;
+  `"123"` → 400 `validation_error`; no token → 401.
 
-- [ ] ⚠️ T3  `GET /property?accountNumber=<n>`
-  - Validate param with Zod — return 400 if missing
-  - Call `adapter.findByAccountNumber(n)` — return 200 + PropertyRecord, or 404
-  - On 200: write `AuditLog` event `PROPERTY_ACCESSED` (userId from JWT,
-    accountNumber queried) — POPIA requires logging access to personal information
-  Done when: curl with seed ACC001 → 200; curl with NOTFOUND001 → 404;
-  psql confirms `AuditLog` row with event `PROPERTY_ACCESSED` after a successful lookup.
+- [x] ✅ T4  Manual search — ✓ verified. `POST /property/search/address`: exactly one of
+  `q | erfNumber` (≥3 chars) else 400; `q` = `LIKE %q%` across address; `erfNumber` = exact
+  normalized match; identity-gate misses fold into `[]`; **200 + array**, never 404.
+  ✓ smoke: `q:"Main Street"` → 1-element array; `erfNumber:"ERF/002/VBP"` → 1-element array;
+  `q:"zzznomatch"` → `[]`; both fields → 400.
+  Also verified beyond plan: `GET /property/:id` full detail (`extentSqm`, `municipalValue`
+  decimal string `"1850000.00"`, `dataAsOf`); **Caching** (`Cache-Control: private, max-age=1800`
+  + strong `ETag`, `If-None-Match` → **304**); unknown id → 404.
 
-- [ ] ⚠️ T4  `GET /property/search?q=<query>`
-  - Validate param with Zod — return 400 if missing or blank
-  - Call `adapter.search(query)` — return 200 + array (empty array for no match,
-    never 404)
-  Done when: curl with "123 Main Street" → 200 + non-empty array;
-  curl with "ERF4567" → 200 + non-empty array;
-  curl with "zzznomatch" → 200 + empty array `[]`.
+- [x] ✅ T5  Unit tests — ✓ verified. `apps/property/src/mappers.test.ts`, 9 tests green
+  (`pnpm --filter ./apps/property test`): identity-gate pass/miss/null-hash/empty-set,
+  summary projection incl. ward-from-metadata, null ownerName/erfNumber, detail money
+  coercion to 2dp decimal string.
 
-- [ ] ⚠️ T5  Unit tests using seed data (from plan/02):
-  - findByAccountNumber: account found (ACC001), account not found (NOTFOUND001)
-  - search: match by address, match by ERF number, no match
-  Done when: `pnpm test` passes in the property-service directory; all five
-  cases covered.
-
-- [ ] ⚠️ T6  Integration smoke against local stack (all four Figma FIND PROPERTY branches):
+- [x] ✅ T6  Integration smoke — ✓ verified (transcript captured). All FIND PROPERTY
+  branches exercised against the live seeded `easyrates_dev` with a real RS256 token. NOTE
+  the plan's curl commands below use the STALE singular routes/404 semantics; the actual
+  verification used the canonical routes/200-null semantics above.
   ```
   ▶ Account Found
     curl GET /property?accountNumber=ACC001 → assert 200
@@ -163,3 +154,40 @@ grep -r "property-adapter.prisma" \
 Gate: check 1 must pass before T3/T4. Checks 3–7 cover all four Figma FIND
 PROPERTY branches — all must pass before plan/07. Check 8 is the adapter
 contract: zero route handler changes needed to swap the data source.
+
+## Execution Note — 2026-06-27
+
+**Built** `apps/property` (Express/TypeScript, pnpm workspace) to the canonical
+`system-design/api/property-service.md`:
+
+- Files: `apps/property/src/{app.ts,server.ts,mappers.ts,mappers.test.ts}`,
+  `package.json`, `tsconfig.json` (extends base).
+- Routes: `POST /property/search/account`, `POST /property/search/address`,
+  `GET /property/:id`, plus `/health` from `@easyrates/http`.
+- Reuses the foundation: `@easyrates/http` `{data,error}` envelope + `ApiError` +
+  `asyncHandler` + error/notFound middleware; the **shared** `requireAuth` RS256
+  bearer middleware promoted into `@easyrates/auth-core` (one copy, reused by all
+  three services + apps/auth); `@easyrates/db` Prisma singleton.
+- Identity gate (ADR-003) enforced server-side hash-to-hash. ADR-004 200+null/[]
+  honoured. Caching section implemented: `Cache-Control: private, max-age=1800` +
+  strong `ETag`, `304` on `If-None-Match`. Money as 2dp decimal string; `ward`/
+  `extentSqm`/`municipalValue`/`dataAsOf` read from `Property.metadata` (the synced
+  raw fields).
+- Seed extended (`packages/db/prisma/seed.ts`): the seed user's `idNumberHash` is
+  now a real keyed HMAC that appears in the seed properties' `holderIdNumberHashes`
+  (so the gate hits), a second property/account added (so address search returns an
+  array and the dashboard can consolidate), property metadata populated. Schema
+  gained notification-preference fields on `User` (see plan/12); `prisma db push`
+  + reseed run green against live `easyrates_dev`.
+
+**Verification:** `pnpm install` ✓; `pnpm -r exec tsc --noEmit` → exit 0 ✓;
+`pnpm --filter ./apps/property test` → 9/9 green ✓; integration smoke vs the live
+seeded DB with a real RS256 token (minted via `@easyrates/auth-core` TokenService +
+the dev keypair) ✓ — account hit/null, address array/`[]`, both-fields 400, detail
+with decimal `municipalValue`, cache headers + `304`, unknown-id 404, no-token 401.
+
+**Honest ⚠️ remaining:** `GET /property/:id/pdf` and `POST /property/link` (in the
+contract but outside this task's build scope); a true identity-gate-MISS smoke on the
+search routes needs an 8-digit account held by ANOTHER user in the seed (the gate-miss
+path is unit-tested, and the no-result null/`[]` path is smoke-verified). Rate-limiting
+(`RateLimit-*`) not yet wired (cross-cutting; plan/05 queue/limiter track).

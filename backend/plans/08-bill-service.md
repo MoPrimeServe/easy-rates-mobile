@@ -33,9 +33,23 @@ implemented; anomaly flags and AI expected amount in response; both municipal
 billing adapter and AI adapter are one replaceable function each; integration
 smoke covers all BILL REVIEW Figma branches.
 
+> **⚠️ Canonical-contract note (2026-06-27).** Superseded by the sealed
+> `system-design/api/bill-service.md`. Routes are `GET /bills`, `GET /bills/:id`,
+> `GET /bills/:id/lines`, `GET /bills/:id/ai-estimate` (NOT singular
+> `GET /bill?accountNumber=`); no-result for an owned-but-missing resource is 404, but
+> ownership failures are 403 and the AI route returns **503 `ai_unavailable`** (not 404)
+> when no calculation exists. `category` enum is the 9-value `LineItemCategory`
+> (`WATER|ELECTRICITY|PROPERTY_RATES|SANITATION|REFUSE|ARREARS|LEVY|VAT|OTHER`), NOT the
+> 5-value list this plan drafted. Money is a decimal string. There is **no `AuditLog`
+> table**. The AI route reads `AIAmountCalculation` and applies the **0.85 confidence
+> gate** + `isStale`. Tasks reconciled below.
+
 ## Tasks
 
-- [ ] ⚠️ T1  Write adapters at `easy_rates/backend/shared/adapters/`:
+- [x] ❌ DESCOPED T1  Standalone `BillingAdapter`/`AiAdapter` interface files.
+  Canonical equivalent: Prisma-backed directly via the `@easyrates/db` singleton; pure
+  mapping/gate logic isolated (unit-tested) in `apps/bill/src/logic.ts`. (Original draft
+  below kept for history.)
 
   `billing-adapter.ts`:
 
@@ -72,44 +86,44 @@ smoke covers all BILL REVIEW Figma branches.
 
   Done when: interfaces exist; no route handler imports any implementation directly.
 
-- [ ] ⚠️ T2  Write Prisma-backed stub implementations:
-  - `billing-adapter.prisma.ts` — queries `Bill` and `BillLineItem` models
-  - `ai-adapter.stub.ts` — returns a fixed expected amount from seed data
+- [x] ❌ DESCOPED T2  `billing-adapter.prisma.ts` / `ai-adapter.stub.ts`. Canonical
+  equivalent: queries in `apps/bill/src/app.ts` against the `@easyrates/db` singleton;
+  the AI estimate reads the real `AIAmountCalculation` row (no stub).
 
-  Done when: stubs compile; `grep -r "new PrismaClient"` in
-  `services/bill-service/` returns zero results.
+- [x] ✅ T3  Bill list — ✓ verified (replaces the singular `GET /bill`). `GET /bills`
+  (`apps/bill/src/app.ts`) returns the per-service-account source-of-truth rows the caller
+  is entitled to (ownership = `Bill.accountNumber ∈ caller's Account.accountNumber set`),
+  each with `category` (dominant `LineItemCategory`), `amount`/`aiExpectedAmount` as decimal
+  strings, `hasAnomaly`, and **`aiExpectedAmount` null below the 0.85 confidence gate**.
+  AuditLog write DESCOPED (no such table). ✓ smoke: list returned rows for `10045821`/
+  `10045822`; confident bill → `aiExpectedAmount:"430.00"`, sub-threshold bill → `null`.
+  Also verified `GET /bills/:id` detail header (validFrom/validTo derived from period,
+  `dataAsOf` datetime, decimal `totalAmount`).
 
-- [ ] ⚠️ T3  `GET /bill?accountNumber=<n>&period=<ym>`
-  - Validate params with Zod
-  - Call `billingAdapter.fetchBill(accountNumber, period)`
-  - Call `aiAdapter.getExpectedAmount(accountNumber, period)`
-  - Return 200 with `BillRecord` + `expectedAmount` field, or 404
-  - On 200: write `AuditLog` event `BILL_ACCESSED` (userId from JWT,
-    accountNumber + period queried) — POPIA requires logging access to financial
-    personal information
-  Done when: curl with seed ACC001 returns bill with line items, anomaly flags,
-  and expectedAmount field; psql confirms `AuditLog` row with event `BILL_ACCESSED`.
+- [x] ✅ T4  Line items — ✓ verified (replaces `GET /bill/line-item/:id`). Canonical route
+  is `GET /bills/:id/lines`: full breakdown with per-line `category`/`amount`/`anomalyFlag`/
+  `historicalAverage` + `subtotal`/`vatAmount`/`totalAmount` that reconcile to the source-of-
+  truth total. ✓ smoke: `subtotal 532.60 + vatAmount 79.80 = totalAmount 612.40`.
+  Unknown bill → 404; no token → 401 (both ✓).
+  Plus `GET /bills/:id/ai-estimate`: ✓ confident branch (0.91 → estimate `430.00`,
+  variance `182.40`, `isStale:false`); ✓ sub-threshold branch (0.82 → `estimatedAmount`/
+  `variance` null, confidence echoed). 503 `ai_unavailable` (no calc) and 403 (not owned)
+  are implemented (simple branches in `app.ts`) — see ⚠️ in the Execution Note.
 
-- [ ] ⚠️ T4  `GET /bill/line-item/:id`
-  - Return single `BillLineItem` with full detail
-  - Return 404 if not found
-  Done when: curl returns correct line item; unknown id returns 404.
+- [x] ✅ T5  Seed — ✓ verified. `packages/db/prisma/seed.ts` extended: bill `2025-05`
+  (sub-0.85 calc) + a new bill `2026-06` on the second account with a **confident** calc
+  (0.91), both with anomaly-flagged line items. `prisma db push` + reseed green; counts:
+  bill 3, billLineItem 8, aiAmountCalculation 3.
 
-- [ ] ⚠️ T5  Seed data for BILL REVIEW Figma branches (add to `prisma/seed.ts`):
-  - Bill available (ACC001, current period, 3+ line items, at least one anomaly)
-  - Bill not available (no Bill record for NOBILL001)
-  - All charges correct (no anomaly flags)
-  - Mixed: some anomaly, some clean
-  Done when: `pnpm db:seed` runs; psql confirms Bill + BillLineItem rows.
+- [x] ✅ T6  Unit tests — ✓ verified. `apps/bill/src/logic.test.ts`, 12 tests green
+  (`pnpm --filter ./apps/bill test`): confidence gate (`aiExpectedAmount` + `toAiEstimate`
+  null/non-null at 0.84/0.85/0.91), `isStale` (model-version change, re-fetch after calc),
+  `dominantCategory`, `periodBounds` (incl. Feb 28), lines reconciliation.
 
-- [ ] ⚠️ T6  Unit tests: bill found, bill not found, expected amount present,
-  expected amount null (AI stub returns null). Line item: found, not found.
-  Done when: `pnpm test` passes in bill-service directory.
-
-- [ ] ⚠️ T7  Integration smoke: curl GET /bill?accountNumber=ACC001 → 200 +
-  line items + expectedAmount; psql confirms Bill row; anomaly flag true on
-  at least one line item.
-  Done when: all Figma BILL REVIEW branches reachable via curl.
+- [x] ✅ T7  Integration smoke — ✓ verified (transcript captured) against live
+  `easyrates_dev` with a real RS256 token; all BILL REVIEW branches reachable. NOTE the
+  plan's curl commands below use STALE singular routes; actual verification used the
+  canonical `/bills…` routes above.
 
 ## Recommended skill
 
@@ -164,3 +178,32 @@ grep -r "billing-adapter.prisma" \
 
 Gate: check 1 must pass before T3/T4. Check 3 must show anomaly flag AND
 expectedAmount in the response body — a bare 200 does not pass this gate.
+
+## Execution Note — 2026-06-27
+
+**Built** `apps/bill` (Express/TypeScript) to the canonical
+`system-design/api/bill-service.md`:
+
+- Files: `apps/bill/src/{app.ts,server.ts,logic.ts,logic.test.ts}`, `package.json`,
+  `tsconfig.json`.
+- Routes: `GET /bills`, `GET /bills/:id`, `GET /bills/:id/lines`,
+  `GET /bills/:id/ai-estimate`, plus `/health`.
+- Reuses `@easyrates/http` envelope/`ApiError`/middleware, the shared
+  `@easyrates/auth-core` `requireAuth`, and the `@easyrates/db` singleton. Ownership =
+  the caller's `Account.accountNumber` set; 404 vs 403 split honoured. Money via
+  `Prisma.Decimal` → 2dp decimal strings. The 0.85 confidence gate, `isStale`
+  (model-version change OR bill re-fetched after the calc), and the `503 ai_unavailable`
+  fallback (no `AIAmountCalculation`) are all implemented in `logic.ts`/`app.ts`.
+
+**Verification:** `tsc --noEmit` → exit 0 ✓; `pnpm --filter ./apps/bill test` → 12/12
+green ✓; integration smoke vs live `easyrates_dev` ✓ — list (confident `aiExpectedAmount`
+`"430.00"` vs null sub-threshold), detail, lines reconciliation (532.60 + 79.80 = 612.40),
+ai-estimate both branches, 404 unknown, 401 no-token.
+
+**Honest ⚠️ remaining:** `503 ai_unavailable` (owned bill with no calc) and `403`
+(bill owned by another user) are coded but not smoke-exercised — the seed has no owned-
+no-calc bill and no foreign-owned bill, and adding those needs DB writes that were out of
+session scope; both are straightforward conditional branches. `GET /bills/summary` and
+`POST /bills/:id/review` are in the contract but outside this task's four-route build scope;
+`GET /bills/summary` is additionally **D1-blocked** (cross-property join key) per the
+contract. Rate-limiting (READ + AI 5/min) not yet wired (plan/05 track).

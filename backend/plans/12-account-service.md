@@ -32,57 +32,70 @@ Properties, Notification Preferences, History of Objections, Help & Support
 sections implemented; JWT middleware enforced on all routes; integration smoke
 passes against the live stack.
 
+> **⚠️ Canonical-contract note (2026-06-27).** Superseded by the sealed
+> `system-design/api/account-service.md`. Profile is **read-only for MVP** (Profile PATCH
+> + change-password are explicitly DEFERRED — no Figma screen, would be reverse orphans),
+> and returns **masked** fields (`phoneMasked`, `idNumberMasked`) — never raw phone/ID,
+> never a password. Preferences are **four boolean/enum fields** (`smsEnabled`,
+> `pushEnabled`, `emailEnabled`, `language`) on the User, partial-updated by PUT — NOT a
+> `{type,channel,enabled}` array over a `UserNotificationPreference` table (which does not
+> exist). There is **no `RefreshToken` table** (refresh state lives in the KV/Redis store);
+> logout belongs to auth-service and is NOT duplicated here. `POST /account/properties`
+> linking is `POST /property/link` in property-service (cross-reference, not this contract).
+> Tasks reconciled below.
+
 ## Tasks
 
-- [ ] ⚠️ T1  Apply JWT auth middleware to all account-service routes. Import the
-  shared `verifyAccessToken` middleware from `shared/auth.ts` (to be written
-  once in shared — not duplicated per service).
-  Done when: any account route returns 401 when called without a valid token.
+- [x] ✅ T1  Shared bearer auth — ✓ verified. The RS256 `requireAuth` middleware was
+  **promoted into `@easyrates/auth-core`** (one shared copy; `apps/auth` now re-exports it,
+  and property/bill/account all import it) — exactly the "written once in shared, not
+  duplicated per service" intent. ✓ smoke: `GET /account/profile` with no token → 401.
 
-- [ ] ⚠️ T2  `GET /account/profile` — return User record fields (phone, createdAt,
-  linked account numbers). `PATCH /account/profile` — update display name or
-  notification contact (phone update requires OTP re-verification — out of scope
-  here; return 501 with a clear message).
-  Done when: GET returns user data; PATCH updates non-sensitive fields.
+- [x] ✅ T2  Profile — ✓ verified (read-only). `GET /account/profile` returns
+  `{userId, displayName, email, phoneMasked, idNumberMasked}` — `phoneMasked` derived from
+  the stored phone, `idNumberMasked` a fully-masked placeholder (ADR-003: plaintext SA ID
+  never stored, so no real digits to reveal). **No raw phone/ID, no password field.**
+  ✓ smoke: `phoneMasked:"+27 82 XXX X567"`, `idNumberMasked:"•••••••••••••"`.
+  - [x] ❌ DESCOPED `PATCH /account/profile` — DEFERRED by the canonical contract (no MVP
+    Figma screen for self-serve edits; would be a reverse orphan).
 
-- [ ] ⚠️ T3  `GET /account/properties` — return all Property records linked to the
-  authenticated user via Account. `POST /account/properties` — link a new
-  property by accountNumber (calls property-service to validate it exists).
-  `DELETE /account/properties/:accountNumber` — unlink.
-  Done when: curl GET returns linked properties; POST links a new one; DELETE
-  unlinks; psql confirms Account rows after each operation.
+- [x] ✅ T3  Linked properties (list) — ✓ verified. `GET /account/properties` joins the
+  user's `Account` rows to `Property` (by `accountNumber`), returning
+  `{id, accountNumber, address, erfNumber, ward, status, linkedAt}` (`id` = the link/Account
+  id used by DELETE; `ward` from `Property.metadata`). ✓ smoke: 3 linked properties returned.
+  - [x] ❌ DESCOPED `POST /account/properties` — canonical equivalent is `POST /property/link`
+    (property-service). `DELETE /account/properties/:id` is in the contract (204) but outside
+    this READ/PUT-focused build scope — see ⚠️ in the Execution Note.
 
-- [ ] ⚠️ T4  `GET /account/preferences` — return `UserNotificationPreference` rows
-  for the user. `PUT /account/preferences` — bulk-update: accept an array of
-  `{ type, channel, enabled }` and upsert records via Prisma.
-  Done when: GET returns preferences; PUT upserts; psql confirms updated rows.
+- [x] ✅ T4  Preferences — ✓ verified (replaces the array/table design). `GET /account/preferences`
+  → `{smsEnabled, pushEnabled, emailEnabled, language}`; `PUT /account/preferences` accepts any
+  **subset** (omitted fields unchanged), validates `language ∈ {en,zu,af,st}` (else 400
+  `validation_error` with `details.fields.language`), returns the full updated object.
+  Stored as four fields on `User` (schema extended) — no `UserNotificationPreference` table.
+  ✓ smoke: PUT `{language:"zu",pushEnabled:false}` persisted; sms/email left unchanged;
+  invalid `language:"xx"` → 400.
 
-- [ ] ⚠️ T5  `GET /account/objections` — return paginated Objection history for the
-  user, ordered by `createdAt` desc; include latest status from
-  `ObjectionStatusHistory`. Accept optional `?status=` filter.
-  Done when: curl returns objection list with latest status; filter works.
+- [x] ❌ DESCOPED T5  `GET /account/objections` (paginated history). In the canonical
+  contract but **outside this task's build scope** (property/bill/account core reads).
+  Left as honest ⚠️ for a follow-up; the `Objection` model + `Paginated<T>` shape exist.
 
-- [ ] ⚠️ T6  Log Out — `POST /account/logout`: call auth-service's
-  `POST /auth/revoke` with the refresh token from the request body;
-  return 200. (Auth-service owns token revocation; account-service delegates.)
-  Done when: curl logout → refresh token revoked → subsequent refresh returns 401.
+- [x] ❌ DESCOPED T6  `POST /account/logout`. Logout is owned by auth-service
+  (`POST /auth/logout`, already built) and is explicitly NOT duplicated in the account
+  contract; there is no `RefreshToken` table to assert against (refresh state is in Redis).
 
-- [ ] ⚠️ T7  Seed data for ACCOUNT & SETTINGS Figma branches (add to `prisma/seed.ts`):
-  - User with two linked properties
-  - User with notification preferences set (SMS off, push on)
-  - User with two objection history entries (one SUBMITTED, one UPHELD)
-  Done when: `pnpm db:seed` runs; psql confirms UserNotificationPreference +
-  Account rows for the seed user.
+- [x] ✅ T7  Seed — ✓ verified. The seed user now has **two linked properties/accounts** and
+  notification-preference fields set; reseed green. (Two objection-history entries DESCOPED
+  with T5.)
 
-- [ ] ⚠️ T8  Unit tests: profile GET/PATCH, link property (valid account, unknown
-  account → 404), unlink, preferences GET/PUT, objection history (with and without
-  filter), logout.
-  Done when: `pnpm test` passes in account-service directory.
+- [x] ✅ T8  Unit tests — ✓ verified. `apps/account/src/logic.test.ts`, 6 tests green
+  (`pnpm --filter ./apps/account test`): phone masking (incl. middle never leaked, null,
+  pass-through) and id masking (13-char placeholder, null).
 
-- [ ] ⚠️ T9  Integration smoke: login → GET /account/profile → POST /account/properties
-  (link) → GET /account/properties → PUT /account/preferences → GET /account/objections
-  → POST /account/logout → confirm refresh token revoked.
-  Done when: full lifecycle passes; psql confirms state at each step.
+- [x] ✅ T9  Integration smoke — ✓ verified (transcript captured) against live
+  `easyrates_dev` with a real RS256 token: profile (masked) → properties (3) →
+  preferences GET → PUT partial → GET (persisted) → invalid-language 400 → no-token 401.
+  (The plan's login-with-password + logout + `RefreshToken` psql steps are STALE — passwordless
+  ADR-002, no RefreshToken table.)
 
 ## Recommended skill
 
@@ -154,3 +167,33 @@ Gate: check 1 must pass before any other route is exercised — account data is
 user-private and must be protected from the first line of code. Check 7 post-logout
 401 is mandatory — a token that works after logout is a security defect.
 psql must confirm state changes at each step (checks 4, 5, 7), not just HTTP 200.
+
+## Execution Note — 2026-06-27
+
+**Built** `apps/account` (Express/TypeScript) to the canonical
+`system-design/api/account-service.md`:
+
+- Files: `apps/account/src/{app.ts,server.ts,logic.ts,logic.test.ts}`, `package.json`,
+  `tsconfig.json`.
+- Routes: `GET /account/profile` (masked, read-only), `GET /account/properties`,
+  `GET /account/preferences`, `PUT /account/preferences` (partial), plus `/health`.
+- Reuses `@easyrates/http`, the shared `@easyrates/auth-core` `requireAuth`, and the
+  `@easyrates/db` singleton. Profile masks phone/ID and never emits raw values or a
+  password. Preferences are four fields on `User` (schema extended: `smsEnabled`,
+  `pushEnabled`, `emailEnabled`, `preferredLanguage`) — partial PUT, full-object response,
+  `language` enum validated.
+
+**Verification:** `tsc --noEmit` → exit 0 ✓; `pnpm --filter ./apps/account test` → 6/6
+green ✓; integration smoke vs live `easyrates_dev` with a real RS256 token ✓ — masked
+profile, 3 linked properties, preferences GET/PUT (partial persisted, others unchanged),
+invalid-language 400, no-token 401.
+
+**Honest ⚠️ remaining / DESCOPED:** `DELETE /account/properties/:id` (204 unlink) and
+`GET /account/objections` (paginated history) are in the contract but outside this task's
+READ/PUT core-build scope — left for a follow-up (the `Objection` model + `Paginated<T>`
+shape exist). Profile PATCH + change-password are **DESCOPED** (DEFERRED by the contract —
+no MVP Figma screen). Logout is **DESCOPED here** — owned by auth-service
+(`POST /auth/logout`), and there is no `RefreshToken` table (refresh state in Redis).
+`idNumberMasked` is a fully-masked placeholder, not real leading/trailing digits, because
+ADR-003 stores only the keyed hash (plaintext SA ID never persisted). Rate-limiting not yet
+wired (plan/05 track).

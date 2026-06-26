@@ -46,3 +46,8 @@ export type { AuthCoreRuntime, StoreBackend } from "./runtime.js";
 
 // Validation helper
 export { parseOrValidationError } from "./zod-validate.js";
+
+// Shared RS256 bearer-auth middleware (promoted from apps/auth — reused by
+// property/bill/account services).
+export { requireAuth } from "./auth-middleware.js";
+export type { AuthedRequest } from "./auth-middleware.js";
