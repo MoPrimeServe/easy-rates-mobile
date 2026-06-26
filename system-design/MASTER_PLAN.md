@@ -113,4 +113,4 @@ to be added — read from here once populated
 - ✅ [07-security-design.md](plans/07-security-design.md) — POPIA inventory, JWT model, rate limits, upload validation, OWASP
 - ✅ [08-container-topology.md](plans/08-container-topology.md) — Podman Compose skeleton, health checks, .env.example
 - ✅ [09-api-contracts.md](plans/09-api-contracts.md) — HTTP contracts per service (TypeScript interfaces), Figma traces, orphan audit
-- ⚠️ [10-adr.md](plans/10-adr.md) — ADR-001 hardened and committed; reversibility stated; Flutter integration notes self-contained
+- ✅ [10-adr.md](plans/10-adr.md) — ADR-001 hardened and committed; reversibility stated; Flutter integration notes self-contained

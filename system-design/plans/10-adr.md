@@ -134,14 +134,17 @@ Reversibility stated for the top three hardest-to-change decisions.
   rationale. Tick it off. Zero decisions left only in a working document.
   Done when: all inventory items ticked; no plan has an undocumented decision.
 
-- [ ] ⚠️ COMMIT `git commit -m "chore(system-design): ADR-001 backend shape accepted"`
+- [x] ✅ COMMIT `git commit -m "chore(system-design): ADR-001 backend shape accepted"` — ✓ done (ADR-001 committed under git on 2026-06-27)
   The system-design scope is now a sealed input artifact for the backend
   implementation scope. No further changes to the ADR without a new ADR number.
   Done when: `git log --oneline -1` shows the commit message.
-  ⚠️ LEFT OPEN — `/home/molef/Work/primeserve` is **not a git repository**
-  (`git rev-parse --is-inside-work-tree` → fatal: not a git repository). The COMMIT
-  cannot be honestly performed and is not fabricated. The ADR content is complete and
-  ready; once the directory is placed under git (or this scope is committed in whatever
+  ✅ RESOLVED 2026-06-27 — `easy_rates/` is now a git repository (`git rev-parse
+  --is-inside-work-tree` → true). ADR-001 is committed in the repo's genesis commit
+  `7215b7b` ("Initial commit: EasyRates system-design, mobile app, backend plans").
+  The literal commit message differs from the suggested string because this was the
+  repository's first/baseline commit rather than an incremental ADR commit; the
+  substantive Done-when — ADR-001 sealed under version control — is met. (Original note,
+  superseded: the directory was not a git repository; once placed under git (or this scope is committed in whatever
   VCS the team adopts), run the commit to seal the artifact. The content gate (checks
   1–6) is satisfied; only the VCS-seal gate (check 7) is blocked.
 
