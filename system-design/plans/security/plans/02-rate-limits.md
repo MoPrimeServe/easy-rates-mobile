@@ -92,7 +92,7 @@ decision for distributed environments.
   Done when: all four categories in the table; 429 shape defined; store decision
   documented.
 
-- [ ] ⚠️ VERIFY Twilio compatibility confirmed ✓ verified (OTP tier: 5 req/15 min/phone
+- [x] ✅ VERIFY Twilio compatibility confirmed ✓ verified (OTP tier: 5 req/15 min/phone
   ≥ Twilio max_attempts; see rate-limits.md + twilio-integration.md).
   api/conventions.md cross-reference pending — api-contracts sub-scope not yet started.
   Done when: api/conventions.md written; 429 shape confirmed to match error envelope.
