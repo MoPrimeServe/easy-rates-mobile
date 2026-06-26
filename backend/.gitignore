@@ -10,6 +10,9 @@ dist/
 # Prisma generated client
 packages/db/generated/
 
+# JWT RS256 dev keypair — NEVER commit the private key (public key is safe to keep)
+keys/jwt-rs256-private.pem
+
 # Logs
 *.log
 npm-debug.log*

@@ -34,6 +34,48 @@ const envSchema = z.object({
   JWT_ACCESS_TTL_SECONDS: z.coerce.number().int().positive().default(900),
   JWT_REFRESH_TTL_DAYS: z.coerce.number().int().positive().default(30),
 
+  // RS256 keypair for access tokens (conventions §6). Supply EITHER the PEM
+  // contents inline (…_PEM) OR a filesystem path to the PEM (…_PEM_PATH).
+  // The private key signs; the public key verifies. Dev keys live under
+  // backend/keys/ (private key gitignored).
+  JWT_PRIVATE_KEY_PEM: z.string().optional(),
+  JWT_PUBLIC_KEY_PEM: z.string().optional(),
+  JWT_PRIVATE_KEY_PEM_PATH: z
+    .string()
+    .default("./keys/jwt-rs256-private.pem"),
+  JWT_PUBLIC_KEY_PEM_PATH: z.string().default("./keys/jwt-rs256-public.pem"),
+  JWT_ISSUER: z.string().default("easyrates-auth"),
+  JWT_AUDIENCE: z.string().default("easyrates-api"),
+
+  // OTP lifecycle params (otp-service contract — central resolved values).
+  OTP_TTL_SECONDS: z.coerce.number().int().positive().default(600),
+  OTP_RESEND_COOLDOWN_SECONDS: z.coerce.number().int().positive().default(30),
+  OTP_MAX_RESENDS_PER_SESSION: z.coerce.number().int().positive().default(3),
+  OTP_MAX_INVALID_ATTEMPTS: z.coerce.number().int().positive().default(5),
+
+  // OTP delivery adapter. OTP_MOCK=true → generate + log/return the code in dev
+  // (the only mode without real Twilio). In production OTP_MOCK MUST be false.
+  OTP_MOCK: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((v) => v === "true"),
+
+  // Registration proof token TTL (single-use, minted by otp/verify REGISTRATION).
+  REGISTRATION_TOKEN_TTL_SECONDS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(600),
+
+  // Server-to-server shared secret guarding otp-service POST /otp/send [internal].
+  INTERNAL_API_SECRET: z
+    .string()
+    .min(1)
+    .default("dev-only-internal-s2s-secret-change-me"),
+
+  // Service base URLs for cross-service calls (auth → otp).
+  OTP_SERVICE_URL: z.string().default("http://localhost:3002"),
+
   // ADR-003 ID-number HMAC pepper
   ID_NUMBER_HMAC_PEPPER: z
     .string()
