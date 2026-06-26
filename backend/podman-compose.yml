@@ -1,0 +1,199 @@
+# =============================================================================
+# EasyRates — Podman Compose (local dev)
+# =============================================================================
+# Promoted from system-design/podman-compose.skeleton.yml.
+#
+# REAL now: postgres (16-alpine) + redis (7-alpine) — both fully runnable.
+# PLACEHOLDER: the 9 Node service `build:` contexts point at apps/<svc>/ which
+#   are scaffolded in later service plans (03–06). Each app needs a Dockerfile
+#   before `podman-compose up <svc>` works; `postgres` and `redis` come up today.
+#
+# Sources of truth (do not re-derive here):
+#   - Container set ......... system-design/docs/service-map.md (9 modules)
+#   - Architecture pattern .. ADR-001 §F (modular monolith, ONE container/service)
+#   - Health-check signal ... GET /health → 200 only when Prisma SELECT 1 succeeds
+#
+# PREREQUISITE: `cp .env.example .env` and fill values before `podman-compose up`.
+# Dev-only services (pgadmin, bull-board) start only with: --profile dev
+# =============================================================================
+
+x-node-healthcheck: &node-healthcheck
+  test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+  interval: 10s
+  timeout: 3s
+  retries: 5
+  start_period: 30s
+
+x-app-deps: &app-deps
+  postgres:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+
+x-app-env: &app-env
+  NODE_ENV: ${NODE_ENV:-development}
+  PORT: ${PORT:-3000}
+
+networks:
+  easyrates_net:
+    driver: bridge
+
+volumes:
+  pgdata:
+  redisdata:
+  pgadmin_data:
+
+services:
+
+  # ===========================================================================
+  # INFRASTRUCTURE (real — runnable today)
+  # ===========================================================================
+
+  postgres:
+    image: postgres:16-alpine
+    networks: [easyrates_net]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-CHANGE_ME}
+      POSTGRES_DB: ${POSTGRES_DB:-easyrates}
+    ports:
+      - "${POSTGRES_EXT_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    networks: [easyrates_net]
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_EXT_PORT:-6379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
+  # ===========================================================================
+  # APPLICATION SERVICES (9) — one container per service (ADR-001 §F)
+  # build contexts are PLACEHOLDERS (apps/<svc> scaffolded in plans 03–06).
+  # ===========================================================================
+
+  auth:
+    build: { context: ., dockerfile: apps/auth/Dockerfile }
+    networks: [easyrates_net]
+    env_file: .env
+    environment: { <<: *app-env, SERVICE_NAME: auth }
+    ports: ["3001:3000"]
+    depends_on: *app-deps
+    healthcheck: *node-healthcheck
+    restart: unless-stopped
+
+  otp:
+    build: { context: ., dockerfile: apps/otp/Dockerfile }
+    networks: [easyrates_net]
+    env_file: .env
+    environment: { <<: *app-env, SERVICE_NAME: otp }
+    ports: ["3002:3000"]
+    depends_on: *app-deps
+    healthcheck: *node-healthcheck
+    restart: unless-stopped
+
+  property:
+    build: { context: ., dockerfile: apps/property/Dockerfile }
+    networks: [easyrates_net]
+    env_file: .env
+    environment: { <<: *app-env, SERVICE_NAME: property }
+    ports: ["3003:3000"]
+    depends_on: *app-deps
+    healthcheck: *node-healthcheck
+    restart: unless-stopped
+
+  account:
+    build: { context: ., dockerfile: apps/account/Dockerfile }
+    networks: [easyrates_net]
+    env_file: .env
+    environment: { <<: *app-env, SERVICE_NAME: account }
+    ports: ["3004:3000"]
+    depends_on: *app-deps
+    healthcheck: *node-healthcheck
+    restart: unless-stopped
+
+  bill:
+    build: { context: ., dockerfile: apps/bill/Dockerfile }
+    networks: [easyrates_net]
+    env_file: .env
+    environment: { <<: *app-env, SERVICE_NAME: bill }
+    ports: ["3005:3000"]
+    depends_on: *app-deps
+    healthcheck: *node-healthcheck
+    restart: unless-stopped
+
+  objection:
+    build: { context: ., dockerfile: apps/objection/Dockerfile }
+    networks: [easyrates_net]
+    env_file: .env
+    environment: { <<: *app-env, SERVICE_NAME: objection }
+    ports: ["3006:3000"]
+    depends_on: *app-deps
+    healthcheck: *node-healthcheck
+    restart: unless-stopped
+
+  notification:
+    build: { context: ., dockerfile: apps/notification/Dockerfile }
+    networks: [easyrates_net]
+    env_file: .env
+    environment: { <<: *app-env, SERVICE_NAME: notification }
+    ports: ["3007:3000"]
+    depends_on: *app-deps
+    healthcheck: *node-healthcheck
+    restart: unless-stopped
+
+  municipality:
+    build: { context: ., dockerfile: apps/municipality/Dockerfile }
+    networks: [easyrates_net]
+    env_file: .env
+    environment: { <<: *app-env, SERVICE_NAME: municipality }
+    ports: ["3008:3000"]
+    depends_on: *app-deps
+    healthcheck: *node-healthcheck
+    restart: unless-stopped
+
+  queue-consumer:
+    build: { context: ., dockerfile: apps/queue-consumer/Dockerfile }
+    networks: [easyrates_net]
+    env_file: .env
+    environment: { <<: *app-env, SERVICE_NAME: queue-consumer }
+    ports: ["3009:3000"]
+    depends_on: *app-deps
+    healthcheck: *node-healthcheck
+    restart: unless-stopped
+
+  # ===========================================================================
+  # DEV-ONLY (profile: dev — `--profile dev` to enable)
+  # ===========================================================================
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    profiles: ["dev"]
+    networks: [easyrates_net]
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-dev@easyrates.local}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-CHANGE_ME}
+    ports: ["5050:80"]
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped

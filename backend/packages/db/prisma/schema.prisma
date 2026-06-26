@@ -1,0 +1,348 @@
+// EasyRates — Prisma schema
+// SOURCE OF TRUTH: system-design/docs/data-model/*.md (12 entities + Municipality + AuditEvent = 14 models)
+// Reconciled to: ADR-002 (passwordless OTP; NO passwordHash), DECISION-A (soft-delete),
+//                DECISION-B (manual AuditEvent), DECISION-C (municipalityId), DECISION-D (cuid PKs),
+//                ADR-003 (idNumberHash / holderIdNumberHashes — plaintext SA ID never stored).
+// Indexes are exactly those named in data-model/indexes.md — no speculative indexes.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// ENUMS
+// ============================================================================
+
+enum KycStatus {
+  PENDING
+  SUBMITTED
+  VERIFIED
+  REJECTED
+}
+
+// ADR-002 passwordless: ONLY these two purposes. No REGISTER / FORGOT_PASSWORD / RESEND.
+enum OtpPurpose {
+  LOGIN
+  REGISTRATION
+}
+
+enum AuditEventType {
+  // POPIA-mandatory events
+  BILL_ACCESSED
+  OBJECTION_SUBMITTED
+  OBJECTION_STATUS_CHANGED
+  EVIDENCE_UPLOADED
+  KYC_DOCUMENT_UPLOADED
+  KYC_STATUS_CHANGED
+  USER_PII_ANONYMISED
+  // Security events
+  OTP_FAILED
+  LOGIN_FAILED
+  // Operational (log at discretion)
+  LOGIN_SUCCESS
+  MUNICIPALITY_RESPONSE_RECEIVED
+  PROPERTY_SEARCHED
+}
+
+enum AccountStatus {
+  ACTIVE
+  INACTIVE
+  ARCHIVED
+}
+
+enum BillStatus {
+  CURRENT
+  OVERDUE
+  PAID
+  DISPUTED
+}
+
+enum LineItemCategory {
+  WATER
+  ELECTRICITY
+  PROPERTY_RATES
+  SANITATION
+  REFUSE
+  ARREARS
+  LEVY
+  VAT
+  OTHER
+}
+
+// Four values locked from the Figma EVIDENCE & CHALLENGE flow. Do NOT extend without a design decision.
+enum ObjectionCategory {
+  WRONG_METER_READING
+  INCORRECT_TARIFF
+  PROPERTY_NOT_OCCUPIED
+  DUPLICATE_OTHER
+}
+
+// Four values locked from the Figma TRACKING & RESOLUTION flow. No DRAFT / SUBMITTED here
+// (draft phase is the separate ObjectionDraft model).
+enum ObjectionStatus {
+  UNDER_REVIEW
+  MORE_INFO_REQUESTED
+  UPHELD
+  REJECTED
+}
+
+enum NotificationChannel {
+  PUSH
+  SMS
+  EMAIL
+}
+
+enum NotificationType {
+  BILL_ISSUED
+  PAYMENT_DUE
+  OBJECTION_STATUS
+  OBJECTION_RECEIVED
+  MORE_INFO_REQUESTED
+  KYC_STATUS
+}
+
+enum NotificationStatus {
+  SENT
+  DELIVERED
+  FAILED
+  PENDING
+}
+
+// ============================================================================
+// IDENTITY — User, OTPAttempt, AuditEvent
+// ============================================================================
+
+model User {
+  id             String    @id @default(cuid())
+  phone          String    @unique
+  email          String?   @unique
+  displayName    String?
+  idNumberHash   String? // HMAC-SHA256(pepper, SA ID) — ADR-003; plaintext never stored. NO passwordHash (ADR-002 passwordless).
+  deviceToken    String? // FCM device token for push notifications
+  kycStatus      KycStatus @default(PENDING)
+  kycDocumentKey String? // Azure Blob Storage key; POPIA: never the raw document
+  deletedAt      DateTime? // DECISION-A: soft-delete; PII anonymised on erasure
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  otpAttempts     OTPAttempt[]
+  accounts        Account[]
+  objectionDrafts ObjectionDraft[]
+  objections      Objection[]
+  notifications   Notification[]
+}
+
+model OTPAttempt {
+  id          String     @id @default(cuid())
+  userId      String
+  code        String // bcrypt hash — never stored or compared in plaintext
+  purpose     OtpPurpose
+  attempts    Int        @default(0)
+  maxAttempts Int        @default(3)
+  expiresAt   DateTime
+  verifiedAt  DateTime?
+  createdAt   DateTime   @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+}
+
+model AuditEvent {
+  id         String         @id @default(cuid())
+  userId     String? // nullable: pre-auth events have no userId. NOT a Prisma relation (manual SetNull on anonymisation).
+  event      AuditEventType
+  entityId   String?
+  entityType String?
+  metadata   Json?
+  createdAt  DateTime       @default(now())
+
+  @@index([userId, createdAt])
+  @@index([entityId, entityType])
+}
+
+// ============================================================================
+// MUNICIPALITY (DECISION-C)
+// ============================================================================
+
+model Municipality {
+  id   String @id @default(cuid())
+  name String @unique
+  code String @unique
+
+  properties Property[]
+  accounts   Account[]
+  bills      Bill[]
+  objections Objection[]
+}
+
+// ============================================================================
+// PROPERTY & ACCOUNT
+// ============================================================================
+
+model Property {
+  id                   String   @id @default(cuid())
+  municipalityId       String
+  accountNumber        String   @unique
+  address              String
+  erfNumber            String?
+  ownerName            String?
+  holderIdNumberHashes String[] // HMAC-SHA256(pepper, holder SA ID) per holder — ADR-003
+  city                 String   @default("Emfuleni")
+  metadata             Json? // raw fields from the municipality billing system sync
+
+  municipality Municipality @relation(fields: [municipalityId], references: [id], onDelete: Restrict)
+
+  @@index([erfNumber])
+}
+
+model Account {
+  id             String        @id @default(cuid())
+  userId         String
+  municipalityId String
+  accountNumber  String        @unique
+  status         AccountStatus @default(ACTIVE)
+  deletedAt      DateTime? // DECISION-A: soft-delete; follows User.deletedAt
+  createdAt      DateTime      @default(now())
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  municipality Municipality @relation(fields: [municipalityId], references: [id], onDelete: Restrict)
+
+  @@index([userId])
+}
+
+// ============================================================================
+// BILL
+// ============================================================================
+
+model Bill {
+  id             String     @id @default(cuid())
+  municipalityId String
+  accountNumber  String // soft reference to Account.accountNumber; no DB FK
+  period         String // "YYYY-MM" e.g. "2025-05"
+  totalAmount    Decimal
+  dueDate        DateTime
+  status         BillStatus @default(CURRENT)
+  fetchedAt      DateTime   @default(now())
+
+  municipality  Municipality         @relation(fields: [municipalityId], references: [id], onDelete: Restrict)
+  lineItems     BillLineItem[]
+  aiCalculation AIAmountCalculation?
+
+  @@index([accountNumber, period])
+}
+
+model BillLineItem {
+  id                String           @id @default(cuid())
+  billId            String
+  description       String
+  amount            Decimal
+  category          LineItemCategory
+  anomalyFlag       Boolean          @default(false)
+  historicalAverage Decimal? // null = no historical data yet for this category
+
+  bill       Bill             @relation(fields: [billId], references: [id], onDelete: Cascade)
+  drafts     ObjectionDraft[]
+  objections Objection[]
+
+  @@index([billId])
+}
+
+model AIAmountCalculation {
+  id              String   @id @default(cuid())
+  billId          String   @unique // one calculation per bill; @unique creates the index
+  estimatedAmount Decimal
+  confidence      Float // 0.0–1.0
+  reasoning       String?
+  modelVersion    String?
+  calculatedAt    DateTime @default(now())
+
+  bill Bill @relation(fields: [billId], references: [id], onDelete: Cascade)
+}
+
+// ============================================================================
+// OBJECTION
+// ============================================================================
+
+model ObjectionDraft {
+  id         String            @id @default(cuid())
+  userId     String
+  lineItemId String?
+  category   ObjectionCategory
+  notes      String?
+  savedAt    DateTime          @default(now())
+
+  user     User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lineItem BillLineItem? @relation(fields: [lineItemId], references: [id], onDelete: SetNull)
+}
+
+model Objection {
+  id             String            @id @default(cuid())
+  userId         String
+  municipalityId String
+  lineItemId     String
+  category       ObjectionCategory
+  status         ObjectionStatus   @default(UNDER_REVIEW)
+  refNumber      String?           @unique // "ELM-2026-NNNNNN" — assigned by municipality adapter
+  notes          String?
+  submittedAt    DateTime?
+  deletedAt      DateTime? // DECISION-A: soft-delete; legal record — never hard-deleted
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  user                  User                   @relation(fields: [userId], references: [id], onDelete: Restrict)
+  municipality          Municipality           @relation(fields: [municipalityId], references: [id], onDelete: Restrict)
+  lineItem              BillLineItem           @relation(fields: [lineItemId], references: [id], onDelete: Restrict)
+  evidenceFiles         EvidenceFile[]
+  municipalityResponses MunicipalityResponse[]
+  notifications         Notification[]
+}
+
+model EvidenceFile {
+  id          String    @id @default(cuid())
+  objectionId String
+  storageKey  String    @unique // Azure Blob Storage key; @unique prevents duplicate uploads
+  filename    String
+  mimeType    String
+  deletedAt   DateTime? // DECISION-A: metadata row retained after blob deletion
+  uploadedAt  DateTime  @default(now())
+
+  objection Objection @relation(fields: [objectionId], references: [id], onDelete: Cascade)
+}
+
+model MunicipalityResponse {
+  id             String          @id @default(cuid())
+  objectionId    String
+  status         ObjectionStatus // the new status the municipality is setting
+  note           String?
+  adjustedAmount Decimal? // set when UPHELD with a proposed adjustment
+  deletedAt      DateTime? // DECISION-A: legal record of municipality's formal response
+  respondedAt    DateTime        @default(now())
+
+  objection Objection @relation(fields: [objectionId], references: [id], onDelete: Restrict)
+}
+
+// ============================================================================
+// NOTIFICATION
+// ============================================================================
+
+model Notification {
+  id          String              @id @default(cuid())
+  userId      String
+  objectionId String?
+  type        NotificationType
+  channel     NotificationChannel
+  status      NotificationStatus  @default(PENDING)
+  sentAt      DateTime            @default(now())
+  readAt      DateTime? // null = unread; API derives read = readAt != null
+
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  objection Objection? @relation(fields: [objectionId], references: [id], onDelete: SetNull)
+
+  @@index([userId, sentAt])
+}
