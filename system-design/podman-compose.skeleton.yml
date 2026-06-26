@@ -1,0 +1,344 @@
+# =============================================================================
+# EasyRates — Podman Compose skeleton (local dev)
+# =============================================================================
+# Sources of truth (do not re-derive here):
+#   - Container set ......... docs/service-map.md (Ownership Matrix — 9 modules)
+#   - Architecture pattern .. docs/ADR-001-backend-shape.md §F
+#                             (modular monolith, ONE container per service)
+#   - Queue tech / Redis tag  docs/queue-topology.md + ADR-001 §A (BullMQ on Redis)
+#   - Resource limits ....... docs/nfr.md (Pilot B1: 1 vCPU / 1.75 GB ceiling)
+#   - Health-check signals .. plans/08-container-topology.md HEALTHCHECKS task
+#
+# ⚠️ Source contradictions resolved in this file (flagged for handoff):
+#   1. service-map.md draws a SINGLE-process monolith; ADR-001 §F (Accepted)
+#      chose ONE container per service. ADR wins → auth→otp, objection→bill
+#      are inter-service HTTP here, not function calls. (objection→status is gone:
+#      status-service dissolved, that transition is now intramodule in objection.)
+#   2. Roster reconciled 2026-06-21 (api-contracts, plan/09): status-service
+#      dissolved → tracking folded into objection-service, History into
+#      account-service, inbound webhook → new municipality-service. This file
+#      ships 9 services incl. `municipality` (replaces `status`) + `queue-consumer`.
+#   3. Prisma pool: nfr.md fixes connection_limit=4/service on the 7-service
+#      math (28<30). With 9 services that is 36>30 — BREACH. .env.example sets
+#      connection_limit=3 (27<30) PENDING ratification in plan/05.
+#
+# -----------------------------------------------------------------------------
+# MINIMUM VIABLE STARTUP SET — what must be healthy for the app's FIRST call
+# -----------------------------------------------------------------------------
+# First call = GET /auth/session (App Launch Token Check), or POST /auth/login.
+# Both hit `auth`. Minimum set = THREE containers:
+#
+#     postgres ──┐
+#                ├──▶ auth ──HTTP──▶ Flutter first call (GET /auth/session)
+#     redis ─────┘
+#
+#   Every other app service also depends on postgres + redis, but is NOT on the
+#   first-call path. queue-consumer is outside the min set even for sign-up:
+#   POST /auth/register returns 202 without the worker healthy; only OTP
+#   *delivery* waits for it (signal-#3 vs async).
+#
+# COLD-START ORDER (enforced via depends_on: condition: service_healthy):
+#   1. postgres -> healthy (pg_isready)
+#   2. redis    -> healthy (redis-cli ping)
+#   3. auth..municipality (8 HTTP services) -> healthy (GET /health, real DB query)
+#   4. queue-consumer -> healthy (side /health server, Redis-ready check)
+#   5. bull-board, pgadmin -> dev profile only; nothing depends on them
+#
+# "healthy" must mean READY-to-serve (DB reachable), NOT just port-open.
+# start_period covers migration + pool warmup to avoid the 500-then-retry race.
+#
+# PREREQUISITE: `cp .env.example .env` and fill values before `podman-compose up`.
+# Dev-only services (pgadmin, bull-board) start only with: --profile dev
+# =============================================================================
+
+# ---- Reusable fragments (compose extension fields; ignored by the runtime) ---
+x-node-healthcheck: &node-healthcheck
+  # node:18+ ships global fetch — no curl/wget needed in the image.
+  # /health must return 200 only when Prisma SELECT 1 (and Redis PING where used)
+  # succeed; 503 otherwise. Implemented in the Node scaffold (backend plans/01).
+  test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+  interval: 10s
+  timeout: 3s
+  retries: 5
+  start_period: 30s
+
+x-app-deps: &app-deps
+  postgres:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+
+x-app-env: &app-env
+  NODE_ENV: ${NODE_ENV:-development}
+  PORT: ${PORT:-3000}
+
+networks:
+  easyrates_net:
+    driver: bridge
+
+volumes:
+  pgdata:
+  redisdata:
+  pgadmin_data:
+
+services:
+
+  # ===========================================================================
+  # INFRASTRUCTURE (roots — no depends_on; must not deadlock startup)
+  # ===========================================================================
+
+  postgres:
+    image: postgres:16-alpine          # ⚠️ tag not yet pinned in an ADR; local stand-in for Azure SQL
+    networks: [easyrates_net]
+    env_file: .env                      # supplies POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB
+    ports:
+      - "${POSTGRES_EXT_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine               # pinned — must match queue-topology.md (VERIFY check 7)
+    networks: [easyrates_net]
+    command: ["redis-server", "--appendonly", "yes"]   # AOF so BullMQ jobs survive restart
+    ports:
+      - "${REDIS_EXT_PORT:-6379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 256M                  # mirrors Redis C0 capacity (~250 MB)
+    restart: unless-stopped
+
+  # ===========================================================================
+  # APPLICATION SERVICES (9) — one container per service (ADR-001 §F)
+  # Σ app tier = 0.90 vCPU / 1664 MB ≤ B1 ceiling (1.0 vCPU / 1792 MB).
+  # cpus/memory below are the VERBATIM source for backend plans/01 deploy.resources.
+  # ===========================================================================
+
+  auth:                                 # [MIN-VIABLE] serves the app's first call
+    image: tbd/auth-service:latest
+    networks: [easyrates_net]
+    env_file: .env
+    environment:
+      <<: *app-env
+      SERVICE_NAME: auth
+    ports: ["3001:3000"]
+    volumes:
+      - ./packages/auth-service:/app/packages/auth-service
+      - /app/packages/auth-service/node_modules   # anon vol shields container deps from host
+    depends_on: *app-deps
+    healthcheck: *node-healthcheck
+    deploy:
+      resources:
+        limits: { cpus: "0.10", memory: 160M }
+    restart: unless-stopped
+
+  otp:
+    image: tbd/otp-service:latest
+    networks: [easyrates_net]
+    env_file: .env
+    environment:
+      <<: *app-env
+      SERVICE_NAME: otp
+    ports: ["3002:3000"]
+    volumes:
+      - ./packages/otp-service:/app/packages/otp-service
+      - /app/packages/otp-service/node_modules
+    depends_on: *app-deps
+    healthcheck: *node-healthcheck
+    deploy:
+      resources:
+        limits: { cpus: "0.10", memory: 160M }
+    restart: unless-stopped
+
+  property:
+    image: tbd/property-service:latest
+    networks: [easyrates_net]
+    env_file: .env
+    environment:
+      <<: *app-env
+      SERVICE_NAME: property
+    ports: ["3003:3000"]
+    volumes:
+      - ./packages/property-service:/app/packages/property-service
+      - /app/packages/property-service/node_modules
+    depends_on: *app-deps
+    healthcheck: *node-healthcheck
+    deploy:
+      resources:
+        limits: { cpus: "0.10", memory: 160M }
+    restart: unless-stopped
+
+  account:
+    image: tbd/account-service:latest
+    networks: [easyrates_net]
+    env_file: .env
+    environment:
+      <<: *app-env
+      SERVICE_NAME: account
+    ports: ["3004:3000"]
+    volumes:
+      - ./packages/account-service:/app/packages/account-service
+      - /app/packages/account-service/node_modules
+    depends_on: *app-deps
+    healthcheck: *node-healthcheck
+    deploy:
+      resources:
+        limits: { cpus: "0.10", memory: 160M }
+    restart: unless-stopped
+
+  bill:
+    image: tbd/bill-service:latest
+    networks: [easyrates_net]
+    env_file: .env
+    environment:
+      <<: *app-env
+      SERVICE_NAME: bill
+    ports: ["3005:3000"]
+    volumes:
+      - ./packages/bill-service:/app/packages/bill-service
+      - /app/packages/bill-service/node_modules
+    depends_on: *app-deps
+    healthcheck: *node-healthcheck
+    deploy:
+      resources:
+        limits: { cpus: "0.10", memory: 256M }   # AI estimate co-located → heavier
+    restart: unless-stopped
+
+  objection:
+    image: tbd/objection-service:latest
+    networks: [easyrates_net]
+    env_file: .env
+    environment:
+      <<: *app-env
+      SERVICE_NAME: objection
+    ports: ["3006:3000"]
+    volumes:
+      - ./packages/objection-service:/app/packages/objection-service
+      - /app/packages/objection-service/node_modules
+    depends_on: *app-deps
+    healthcheck: *node-healthcheck
+    deploy:
+      resources:
+        limits: { cpus: "0.10", memory: 256M }   # blob upload buffering → heavier
+    restart: unless-stopped
+
+  notification:
+    image: tbd/notification-service:latest
+    networks: [easyrates_net]
+    env_file: .env
+    environment:
+      <<: *app-env
+      SERVICE_NAME: notification
+    ports: ["3007:3000"]
+    volumes:
+      - ./packages/notification-service:/app/packages/notification-service
+      - /app/packages/notification-service/node_modules
+    depends_on: *app-deps
+    healthcheck: *node-healthcheck
+    deploy:
+      resources:
+        limits: { cpus: "0.10", memory: 160M }
+    restart: unless-stopped
+
+  municipality:                         # inbound CRM webhook (X-Municipal-Webhook-Secret); not called by Flutter
+    image: tbd/municipality-service:latest
+    networks: [easyrates_net]
+    env_file: .env                        # needs MUNICIPAL_WEBHOOK_SECRET (see .env.example)
+    environment:
+      <<: *app-env
+      SERVICE_NAME: municipality
+    ports: ["3008:3000"]
+    volumes:
+      - ./packages/municipality-service:/app/packages/municipality-service
+      - /app/packages/municipality-service/node_modules
+    depends_on: *app-deps
+    healthcheck: *node-healthcheck
+    deploy:
+      resources:
+        limits: { cpus: "0.10", memory: 160M }
+    restart: unless-stopped
+
+  queue-consumer:                       # BullMQ worker — no Flutter screens; runs a side /health server
+    image: tbd/queue-consumer:latest
+    networks: [easyrates_net]
+    env_file: .env
+    environment:
+      <<: *app-env
+      SERVICE_NAME: queue-consumer
+    ports: ["3009:3000"]                # published only so humans can curl /health; no app ingress
+    volumes:
+      - ./packages/queue-consumer:/app/packages/queue-consumer
+      - /app/packages/queue-consumer/node_modules
+    depends_on: *app-deps               # writes job/OTP state to Postgres + connects to Redis broker
+    healthcheck: *node-healthcheck
+    deploy:
+      resources:
+        limits: { cpus: "0.10", memory: 192M }
+    restart: unless-stopped
+
+  # ===========================================================================
+  # DEV-ONLY (profile: dev — NOT started for tests/CI; `--profile dev` to enable)
+  # ===========================================================================
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    profiles: ["dev"]
+    networks: [easyrates_net]
+    env_file: .env                      # supplies PGADMIN_DEFAULT_EMAIL / PGADMIN_DEFAULT_PASSWORD
+    ports: ["5050:80"]
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:80/misc/ping').status==200 else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 256M }
+    restart: unless-stopped
+
+  bull-board:                           # BullMQ job monitor UI
+    image: tbd/bull-board:latest
+    profiles: ["dev"]
+    networks: [easyrates_net]
+    env_file: .env                      # needs REDIS_URL to read queues
+    ports: ["3010:3000"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits: { cpus: "0.10", memory: 128M }
+    restart: unless-stopped

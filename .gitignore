@@ -1,0 +1,36 @@
+# ── Bundled Flutter SDK (toolchain, not project source) ──
+mobile_app/flutter/
+
+# ── Flutter app build & generated ──
+**/.dart_tool/
+**/build/
+**/.flutter-plugins
+**/.flutter-plugins-dependencies
+**/.packages
+*.iml
+.metadata
+
+# ── Nested, self-managed repo (has its own .git) ──
+web_app/
+
+# ── Python ──
+**/__pycache__/
+*.py[cod]
+**/.venv/
+**/venv/
+**/.ruff_cache/
+**/.pytest_cache/
+**/.mypy_cache/
+
+# ── Node ──
+**/node_modules/
+**/dist/
+
+# ── Secrets / env (keep .env.example) ──
+**/.env
+**/.env.local
+!**/.env.example
+
+# ── OS / editor ──
+.DS_Store
+*.swp
