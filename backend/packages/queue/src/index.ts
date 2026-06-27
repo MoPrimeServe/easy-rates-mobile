@@ -15,6 +15,21 @@ export {
 } from "./notification-queue.js";
 export type { NotificationJobData } from "./notification-queue.js";
 
+// Push-notification provider (FCM / mock)
+export {
+  MockPushProvider,
+  FcmPushProvider,
+  selectPushProvider,
+  createFirebaseMessaging,
+  resolveCredentialPath,
+  __resetPushProviderForTests,
+} from "./push-provider.js";
+export type {
+  PushProvider,
+  PushMessage,
+  FirebaseMessaging,
+} from "./push-provider.js";
+
 // Objection submission queue
 export {
   OBJECTION_SUBMIT_QUEUE_NAME,

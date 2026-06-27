@@ -40,9 +40,27 @@ export {
   hashIdNumber,
 } from "./identity.js";
 
+// OTP delivery providers (swappable boundary)
+export { MockOtpProvider } from "./otp-provider.js";
+export type { OtpProvider } from "./otp-provider.js";
+export {
+  TwilioVerifyProvider,
+  mapVerifyOutcome,
+} from "./twilio-verify.js";
+export type {
+  TwilioVerifyApi,
+  TwilioVerifyConfig,
+  TwilioLikeError,
+} from "./twilio-verify.js";
+export {
+  createTwilioVerifyApi,
+  fetchVerifyService,
+} from "./twilio-client.js";
+export type { TwilioCreds } from "./twilio-client.js";
+
 // Runtime wiring
 export { createAuthCoreRuntime } from "./runtime.js";
-export type { AuthCoreRuntime, StoreBackend } from "./runtime.js";
+export type { AuthCoreRuntime, StoreBackend, OtpDriver } from "./runtime.js";
 
 // Validation helper
 export { parseOrValidationError } from "./zod-validate.js";

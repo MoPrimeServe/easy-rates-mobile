@@ -5,6 +5,10 @@ allowBuilds:
   # Optional native accelerator for bullmq's msgpackr serializer; building it
   # clears the ignored-build gate that otherwise fails `pnpm install`.
   msgpackr-extract: true
+  # firebase-admin pulls these in; their postinstall scripts are non-essential
+  # (funding/patch notices only) — declared false to clear the ignored-build gate.
+  '@firebase/util': false
+  protobufjs: false
 onlyBuiltDependencies:
   - "@prisma/client"
   - "@prisma/engines"

@@ -36,12 +36,17 @@ Figma branches; integration smoke passes.
 
 ## Tasks
 
-- [x] ❌ DESCOPED (2026-06-27) T1  MinIO emulator. The canonical contract targets
-  **Azure Blob Storage**, not S3/MinIO. For local dev evidence is stored via a
-  filesystem **blob-store stub** (`apps/objection/src/blob-store.ts`, dir from
-  `BLOB_DIR`, gitignored) recording the key on `EvidenceFile.storageKey`. A real
-  Azure Blob adapter remains ⚠️ TODO (swap one file). MinIO/`BLOB_ACCESS_KEY`
-  etc. are not in any contract.
+- [x] ✅ — ✓ verified (2026-06-27 adapters) T1  Real **Azure Blob Storage** adapter
+  built. `apps/objection/src/blob-store.ts` now exposes an `EvidenceStore`
+  interface with two impls: `AzureBlobStore`
+  (`BlobServiceClient.fromConnectionString`, put/get/delete against the `evidence`
+  container, auto-create-if-absent) and the existing `LocalBlobStore` stub. Backend
+  selected by `BLOB_DRIVER` (azure when `AZURE_STORAGE_CONNECTION_STRING` present,
+  else local) — `decideBlobDriver` is pure + unit-tested. Both use the same
+  portable key shape `objections/<id>/<uuid>.<ext>`. Env added to `packages/config`
+  + `.env.example` (placeholders). LIVE SMOKE against the `easyrates` storage
+  account: uploaded `__smoketest/<ts>.txt` → downloaded (bytes matched) → DELETED
+  (cleanup verified). MinIO emulator remains ❌ DESCOPED (not in any contract).
 
 - [ ] ⚠️ T2  Write the municipality submission adapter interface at
   `easy_rates/backend/shared/adapters/municipality-submission-adapter.ts`:
@@ -88,7 +93,8 @@ Figma branches; integration smoke passes.
   `EvidenceFile.storageKey`, returns the **detected** mimeType. 201 Created.
   MORE_INFO_REQUESTED upload auto-transitions back to UNDER_REVIEW. Verified:
   smoke (200 valid PDF written to disk + 422 on a zip masquerading as pdf) +
-  unit tests (`validateEvidenceFile` size/MIME/count). ⚠️ Real Azure Blob TODO.
+  unit tests (`validateEvidenceFile` size/MIME/count). ✅ Real Azure Blob now wired
+  (T1) — `putEvidence` routes through the env-selected `EvidenceStore`.
 
 - [ ] ⚠️ T5  `GET /objections/:id/summary` — Review Summary view. Defined in the
   canonical contract but **out of this build's scope** (the 5 core routes built
@@ -224,3 +230,28 @@ Key reconciliations:
 Verified: `pnpm -r exec tsc --noEmit` → 0; 15 unit tests green; full live-DB+Redis smoke
 (transcript + psql row checks). Deferred (honest ⚠️): `GET /:id/summary`, `/:id/sufficiency`,
 `/:ref/probe`, `/escalate`, `/close`, real Azure Blob, and the full rate-limit infra.
+
+---
+
+## Execution Note — 2026-06-27 (adapters)
+
+Wired the **real Azure Blob Storage** evidence backend behind an `EvidenceStore`
+interface in `apps/objection/src/blob-store.ts`:
+- `AzureBlobStore` — `BlobServiceClient.fromConnectionString` → `evidence`
+  container (created-if-absent); `put` (uploadData with content-type), `get`
+  (downloadToBuffer), `delete` (deleteIfExists). `LocalBlobStore` keeps the
+  filesystem stub. `selectEvidenceStore()`/`decideBlobDriver()` choose by
+  `BLOB_DRIVER` (auto: azure iff `AZURE_STORAGE_CONNECTION_STRING` set, else local).
+  `putEvidence` (used by the route) now delegates to the selected store.
+- Env added to `packages/config` Zod + `.env.example` (placeholders):
+  `AZURE_STORAGE_CONNECTION_STRING`, `AZURE_BLOB_CONTAINER` (default `evidence`),
+  `BLOB_DRIVER`.
+
+**Verification**
+- `pnpm -r exec tsc --noEmit` → 0; full suite **104 passed** (objection +5:
+  `decideBlobDriver` selection + `LocalBlobStore` put/get/delete round-trip).
+- LIVE SMOKE (storage account `easyrates`, container `evidence`): uploaded
+  `__smoketest/<ts>.txt` → downloaded (bytesMatch true) → deleted
+  (cleanupVerified true). The smoke object was removed; no residue.
+- WRITE/READ/SUBMIT rate-limits wired on the objection routes (draft/evidence →
+  WRITE, submit → SUBMIT 5/24h, list/status → READ).

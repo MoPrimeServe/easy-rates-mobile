@@ -37,11 +37,19 @@ and status change events.
 
 ## Tasks
 
-- [x] ⚠️ T1  Env. `REDIS_URL` (BullMQ broker) is already in `packages/config`;
-  `BLOB_DIR` and the webhook secret were added this build. ⚠️ Real `FCM_SERVER_KEY`
-  / APNs / `TWILIO_NOTIFY_SERVICE_SID` remain TODO — dispatch is a **mock push**
-  (structured log) in the BullMQ notification worker; `NOTIFICATION_MOCK` as a
-  separate flag was not needed (the mock is the only adapter for MVP).
+- [x] ✅ — ✓ verified (2026-06-27 adapters) T1  Env + real **FCM** push adapter.
+  `REDIS_URL` already present; FCM env added to `packages/config` Zod +
+  `.env.example` (placeholders): `GOOGLE_APPLICATION_CREDENTIALS`, `FCM_PROJECT_ID`,
+  `PUSH_DRIVER`. `packages/queue/src/push-provider.ts` implements `FcmPushProvider`
+  (firebase-admin `messaging().send`) + `MockPushProvider`, selected by
+  `PUSH_DRIVER` (fcm when a credential is present, else mock; default-safe with a
+  mock fallback if init fails). Wired into the notification worker
+  (`processNotificationJob` dispatches PUSH-channel rows with a device token via
+  the selected provider; push failure is logged and never fails the job). LIVE
+  SMOKE: firebase-admin initialised for project `easyrates-10809`; a **dry-run**
+  send (`send(msg, true)`) with a dummy token round-tripped (FCM returned
+  `messaging/invalid-argument` — a token-level rejection that proves auth/project
+  authenticated; no delivery). APNs / `TWILIO_NOTIFY_SERVICE_SID` remain ⚠️ TODO.
 
 - [x] ❌ DESCOPED (2026-06-27) T2  `POST /notify` HTTP route. The canonical
   notification-service contract has **no inbound `/notify` route** — outbound
@@ -152,3 +160,28 @@ migrated schema, so `read = (readAt != null)` is derived directly.
 
 Verified: `pnpm -r exec tsc --noEmit` → 0; 11 unit tests green; live-DB+Redis smoke
 (transcript + psql). Honest ⚠️: real FCM/APNs/Twilio adapters and the full rate-limit infra.
+
+---
+
+## Execution Note — 2026-06-27 (adapters)
+
+Wired the **real FCM** push adapter and the **rate-limiter**.
+- `packages/queue/src/push-provider.ts` — `PushProvider` interface with
+  `FcmPushProvider` (firebase-admin `applicationDefault`/cert from
+  `GOOGLE_APPLICATION_CREDENTIALS`, `messaging().send(message, dryRun?)`) and
+  `MockPushProvider`. `selectPushProvider()` picks by `PUSH_DRIVER` (fcm iff a
+  credential resolves, else mock; mock fallback on init failure). The notification
+  worker now dispatches PUSH-channel rows with a device token through it (push is
+  a wake-hint — failures are logged, the row still flips to SENT).
+- Env added to `packages/config` + `.env.example` (placeholders):
+  `GOOGLE_APPLICATION_CREDENTIALS`, `FCM_PROJECT_ID`, `PUSH_DRIVER`.
+- READ/WRITE rate-limits wired on the notification routes (inbox → READ;
+  read/read-all/device-token → WRITE).
+
+**Verification**
+- `pnpm -r exec tsc --noEmit` → 0; full suite **104 passed** (queue +5 push-provider
+  tests: FCM message-shape + dryRun forwarding, error propagation, mock no-op,
+  credential-path resolution).
+- LIVE SMOKE: firebase-admin init for project `easyrates-10809`; **dry-run** send
+  with a dummy token round-tripped (`messaging/invalid-argument` = auth OK,
+  no delivery). Honest ⚠️ remaining: APNs, Twilio SMS/EMAIL channels.

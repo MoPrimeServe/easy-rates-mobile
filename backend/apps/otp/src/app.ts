@@ -7,6 +7,7 @@ import {
   makeHealthHandler,
   notFoundMiddleware,
   ok,
+  rateLimit,
 } from "@easyrates/http";
 import { prisma } from "@easyrates/db";
 import { env } from "@easyrates/config";
@@ -68,6 +69,7 @@ export function createOtpApp(rt: AuthCoreRuntime): Express {
   // ---- POST /otp/send  [internal] — server-to-server from auth-service ------
   app.post(
     "/otp/send",
+    rateLimit("OTP-SEND"),
     asyncHandler(async (req, res) => {
       const provided = req.header("x-internal-secret");
       if (provided !== env.INTERNAL_API_SECRET) {
@@ -95,6 +97,7 @@ export function createOtpApp(rt: AuthCoreRuntime): Express {
   // ---- POST /otp/verify  [public] ------------------------------------------
   app.post(
     "/otp/verify",
+    rateLimit("OTP-VERIFY"),
     asyncHandler(async (req, res) => {
       const { phone, code } = parseOrValidationError(verifySchema, req.body);
       const { purpose } = await rt.otp.verify(phone, code);
@@ -134,6 +137,7 @@ export function createOtpApp(rt: AuthCoreRuntime): Express {
   // ---- POST /otp/resend  [public] ------------------------------------------
   app.post(
     "/otp/resend",
+    rateLimit("OTP-SEND"),
     asyncHandler(async (req, res) => {
       const { phone, purpose } = parseOrValidationError(resendSchema, req.body);
       const result = await rt.otp.resend(phone, purpose);

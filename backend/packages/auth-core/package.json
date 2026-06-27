@@ -18,6 +18,7 @@
     "@easyrates/http": "workspace:*",
     "ioredis": "^5.4.1",
     "jsonwebtoken": "^9.0.2",
+    "twilio": "^5.4.0",
     "zod": "^3.23.8"
   },
   "peerDependencies": {

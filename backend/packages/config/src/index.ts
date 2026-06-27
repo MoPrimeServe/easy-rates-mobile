@@ -1,4 +1,6 @@
 import { config as loadDotenv } from "dotenv";
+import { existsSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { z } from "zod";
 
 /**
@@ -8,9 +10,29 @@ import { z } from "zod";
  * `process.env` directly in handlers.
  */
 
-// Load .env from the backend root (monorepo root). dotenv is a no-op if vars
-// are already set (e.g. injected by the container runtime).
-loadDotenv();
+/**
+ * Locate the monorepo-root `.env` by walking up from cwd until a directory
+ * containing `pnpm-workspace.yaml` (the backend root) is found. This makes env
+ * loading robust whether the process starts from the backend root (services via
+ * tsx) or a package directory (vitest runs with cwd = the package). Returns the
+ * resolved `.env` path, or undefined to let dotenv fall back to cwd.
+ */
+function findRootEnv(): string | undefined {
+  let dir = process.cwd();
+  for (let i = 0; i < 8; i += 1) {
+    if (existsSync(resolve(dir, "pnpm-workspace.yaml"))) {
+      return resolve(dir, ".env");
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return undefined;
+}
+
+// Load .env from the backend root (monorepo root). dotenv is a no-op for vars
+// already set (e.g. injected by the container runtime).
+loadDotenv({ path: findRootEnv() });
 
 const portSchema = z.coerce.number().int().positive().max(65535);
 
@@ -94,6 +116,33 @@ const envSchema = z.object({
   // Local blob-storage stub directory (objection evidence). Azure Blob Storage
   // is the production target — this is the dev stub. Gitignored.
   BLOB_DIR: z.string().min(1).default("./blob-store"),
+
+  // ---- Azure Blob Storage (objection evidence — prod target) ---------------
+  // Connection string for the `easyrates` storage account. When present (and
+  // BLOB_DRIVER is "auto" or "azure") the AzureBlobStore is selected; otherwise
+  // the local filesystem stub (BLOB_DIR) is used.
+  AZURE_STORAGE_CONNECTION_STRING: z.string().optional(),
+  AZURE_BLOB_CONTAINER: z.string().min(1).default("evidence"),
+  // Evidence blob backend selector. "auto" (default): azure iff a connection
+  // string is present, else local. "azure"/"local" force the choice.
+  BLOB_DRIVER: z.enum(["auto", "azure", "local"]).default("auto"),
+
+  // ---- FCM (push notifications) --------------------------------------------
+  // Service-account credential for firebase-admin. Path is resolved relative to
+  // the backend root. FCM_PROJECT_ID pins the project for the dry-run check.
+  GOOGLE_APPLICATION_CREDENTIALS: z.string().optional(),
+  FCM_PROJECT_ID: z.string().optional(),
+  // Push backend selector. "auto" (default): fcm iff a credential is present,
+  // else the mock (structured-log) push. "fcm"/"mock" force the choice.
+  PUSH_DRIVER: z.enum(["auto", "fcm", "mock"]).default("auto"),
+
+  // ---- Rate limiting (conventions §5; Redis-backed) ------------------------
+  // Master toggle. Default true; set false to disable all limiters (e.g. tests).
+  // Falls back to a fail-open in-memory counter when Redis is unavailable.
+  RATE_LIMIT_ENABLED: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((v) => v === "true"),
 });
 
 export type Env = z.infer<typeof envSchema>;

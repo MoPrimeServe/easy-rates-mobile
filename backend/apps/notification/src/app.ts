@@ -7,6 +7,7 @@ import {
   makeHealthHandler,
   notFoundMiddleware,
   ok,
+  rateLimit,
 } from "@easyrates/http";
 import { prisma } from "@easyrates/db";
 import {
@@ -52,6 +53,7 @@ export function createNotificationApp(rt: AuthCoreRuntime): Express {
   app.get(
     "/notifications",
     requireAuth(rt.tokens),
+    rateLimit("READ"),
     asyncHandler(async (req: AuthedRequest, res) => {
       const { page, pageSize, unreadOnly } = parseOrValidationError(
         listQuerySchema,
@@ -93,6 +95,7 @@ export function createNotificationApp(rt: AuthCoreRuntime): Express {
   app.post(
     "/notifications/read-all",
     requireAuth(rt.tokens),
+    rateLimit("WRITE"),
     asyncHandler(async (req: AuthedRequest, res) => {
       const result = await prisma.notification.updateMany({
         where: { userId: req.userId, readAt: null },
@@ -106,6 +109,7 @@ export function createNotificationApp(rt: AuthCoreRuntime): Express {
   app.post(
     "/notifications/:id/read",
     requireAuth(rt.tokens),
+    rateLimit("WRITE"),
     asyncHandler(async (req: AuthedRequest, res) => {
       const notification = await prisma.notification.findUnique({
         where: { id: req.params.id },
@@ -130,6 +134,7 @@ export function createNotificationApp(rt: AuthCoreRuntime): Express {
   app.post(
     "/notifications/device-token",
     requireAuth(rt.tokens),
+    rateLimit("WRITE"),
     asyncHandler(async (req: AuthedRequest, res) => {
       const body = parseOrValidationError(deviceTokenSchema, req.body);
       await prisma.user.update({

@@ -6,6 +6,7 @@ import {
   makeHealthHandler,
   notFoundMiddleware,
   ok,
+  rateLimit,
 } from "@easyrates/http";
 import { prisma } from "@easyrates/db";
 import {
@@ -66,6 +67,7 @@ export function createBillApp(rt: AuthCoreRuntime): Express {
   app.get(
     "/bills",
     requireAuth(rt.tokens),
+    rateLimit("READ"),
     asyncHandler(async (req: AuthedRequest, res) => {
       const owned = await callerAccountNumbers(req);
       const bills = await prisma.bill.findMany({
@@ -81,6 +83,7 @@ export function createBillApp(rt: AuthCoreRuntime): Express {
   app.get(
     "/bills/:id",
     requireAuth(rt.tokens),
+    rateLimit("READ"),
     asyncHandler(async (req: AuthedRequest, res) => {
       const bill = await ownedBill(req);
       const holder = await callerName(req);
@@ -92,6 +95,7 @@ export function createBillApp(rt: AuthCoreRuntime): Express {
   app.get(
     "/bills/:id/lines",
     requireAuth(rt.tokens),
+    rateLimit("READ"),
     asyncHandler(async (req: AuthedRequest, res) => {
       const bill = await ownedBill(req);
       res.status(200).json(ok(toLines(bill, bill.lineItems)));
@@ -105,6 +109,7 @@ export function createBillApp(rt: AuthCoreRuntime): Express {
   app.get(
     "/bills/:id/ai-estimate",
     requireAuth(rt.tokens),
+    rateLimit("READ"),
     asyncHandler(async (req: AuthedRequest, res) => {
       const bill = await ownedBill(req);
       if (!bill.aiCalculation) {

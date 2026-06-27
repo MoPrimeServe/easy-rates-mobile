@@ -21,3 +21,7 @@ apps/objection/blob-store/
 *.log
 npm-debug.log*
 pnpm-debug.log*
+
+# ── ALL key material / service-account JSON (secrets) ──
+keys/
+!keys/jwt-rs256-public.pem

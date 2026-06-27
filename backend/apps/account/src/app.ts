@@ -7,6 +7,7 @@ import {
   makeHealthHandler,
   notFoundMiddleware,
   ok,
+  rateLimit,
 } from "@easyrates/http";
 import { prisma } from "@easyrates/db";
 import {
@@ -59,6 +60,7 @@ export function createAccountApp(rt: AuthCoreRuntime): Express {
   app.get(
     "/account/profile",
     requireAuth(rt.tokens),
+    rateLimit("READ"),
     asyncHandler(async (req: AuthedRequest, res) => {
       const user = await prisma.user.findFirst({
         where: { id: req.userId, deletedAt: null },
@@ -82,6 +84,7 @@ export function createAccountApp(rt: AuthCoreRuntime): Express {
   app.get(
     "/account/properties",
     requireAuth(rt.tokens),
+    rateLimit("READ"),
     asyncHandler(async (req: AuthedRequest, res) => {
       const accounts = await prisma.account.findMany({
         where: { userId: req.userId, deletedAt: null },
@@ -113,6 +116,7 @@ export function createAccountApp(rt: AuthCoreRuntime): Express {
   app.get(
     "/account/preferences",
     requireAuth(rt.tokens),
+    rateLimit("READ"),
     asyncHandler(async (req: AuthedRequest, res) => {
       const user = await prisma.user.findFirst({
         where: { id: req.userId, deletedAt: null },
@@ -126,6 +130,7 @@ export function createAccountApp(rt: AuthCoreRuntime): Express {
   app.put(
     "/account/preferences",
     requireAuth(rt.tokens),
+    rateLimit("WRITE"),
     asyncHandler(async (req: AuthedRequest, res) => {
       const patch = parseOrValidationError(preferencesUpdateSchema, req.body);
       const data: Record<string, unknown> = {};

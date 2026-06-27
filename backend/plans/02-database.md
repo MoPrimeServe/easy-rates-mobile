@@ -298,3 +298,20 @@ an existing database. This commit is the explicit unblock signal for plans 03–
   `packages/db/src/index.ts`, not `shared/db.ts`.
 
 **Still open:** T8 (human commit). Migration dir is on disk, `.env` gitignored.
+
+---
+
+## Execution Note — 2026-06-27 (adapters)
+
+**Migration cleanup.** The notification-preference fields on `User`
+(`smsEnabled`, `pushEnabled`, `emailEnabled`, `preferredLanguage`) had been
+applied to the live `easyrates_dev` via `prisma db push` with no migration, so
+migration history lagged the schema. Generated a proper migration
+`20260628003913_notification_prefs` with `prisma migrate diff --from-migrations
+--to-schema-datamodel --shadow-database-url` (a throwaway shadow DB), capturing
+exactly the four `ALTER TABLE "User" ADD COLUMN …` statements. Because the live
+DB already had the columns, the migration was recorded with `prisma migrate
+resolve --applied 20260628003913_notification_prefs` rather than re-executed
+(noted in the migration header). `prisma migrate status` → "Database schema is up
+to date" with 2 migrations; a re-run `migrate diff` (migrations → schema) is now
+**empty** (history == schema). The shadow DB was dropped.

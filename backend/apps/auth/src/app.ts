@@ -8,6 +8,7 @@ import {
   makeHealthHandler,
   notFoundMiddleware,
   ok,
+  rateLimit,
 } from "@easyrates/http";
 import { Prisma, prisma } from "@easyrates/db";
 import { env } from "@easyrates/config";
@@ -66,6 +67,7 @@ export function createAuthApp(rt: AuthCoreRuntime): Express {
   // ---- POST /auth/register/start  [public] ---------------------------------
   app.post(
     "/auth/register/start",
+    rateLimit("AUTH"),
     asyncHandler(async (req, res) => {
       const { phone } = parseOrValidationError(registerStartSchema, req.body);
       const existing = await prisma.user.findFirst({
@@ -88,6 +90,7 @@ export function createAuthApp(rt: AuthCoreRuntime): Express {
   // ---- POST /auth/register  [public] ---------------------------------------
   app.post(
     "/auth/register",
+    rateLimit("AUTH"),
     asyncHandler(async (req, res) => {
       const body = parseOrValidationError(registerSchema, req.body);
       // Consume the single-use registrationToken (bound to the verified phone).
@@ -134,6 +137,7 @@ export function createAuthApp(rt: AuthCoreRuntime): Express {
   // ---- POST /auth/login  [public] — anti-enumeration, always 200 -----------
   app.post(
     "/auth/login",
+    rateLimit("AUTH"),
     asyncHandler(async (req, res) => {
       const { phone } = parseOrValidationError(loginSchema, req.body);
       const user = await prisma.user.findFirst({
@@ -158,6 +162,7 @@ export function createAuthApp(rt: AuthCoreRuntime): Express {
   // ---- POST /auth/refresh  [public] — rotate -------------------------------
   app.post(
     "/auth/refresh",
+    rateLimit("AUTH"),
     asyncHandler(async (req, res) => {
       const { refreshToken } = parseOrValidationError(refreshSchema, req.body);
       const pair = await rt.tokens.refresh(refreshToken);

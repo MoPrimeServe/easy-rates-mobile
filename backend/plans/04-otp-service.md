@@ -77,17 +77,27 @@ operation. Integration smoke passes with DB + Redis state verified at each step.
   attemptsRemaining). Transcript in the Execution Note. Redis is the
   authoritative phone-keyed store; `/health` reports `queue:"connected"`.
 
-- [ ] ⚠️ T6  Real Twilio Verify adapter — the delivery interface is swappable but
-  ONLY the `OTP_MOCK` adapter is implemented. A Twilio Verify adapter
-  (`verifications.create` / `verificationChecks.create`, error-code mapping
-  60200/60202, circuit breaker) needs real Twilio creds — honest ⚠️.
+- [x] ✅ — ✓ verified (2026-06-27 adapters) T6  Real Twilio Verify adapter built
+  behind the swappable `OtpProvider` interface (`packages/auth-core`:
+  `otp-provider.ts`, `twilio-verify.ts`, `twilio-client.ts`). `send`/`resend` →
+  `verify.v2.services(SID).verifications.create({to,channel:'sms'})`; `verify` →
+  `verificationChecks.create({to,code})`. Outcome mapping (`mapVerifyOutcome`,
+  unit-tested): approved→success; pending→`otp_invalid` 422; 60200→`otp_expired`
+  410; 60202→`max_attempts_exceeded` 429; 20404→`otp_expired`. Provider selected
+  in the runtime by `OTP_MOCK` (true→mock, false→twilio); default-safe (falls back
+  to mock if creds incomplete). LIVE SMOKE: `verify.v2.services(SID).fetch()`
+  returned friendlyName="Easy Rates OTP", SID present (VA…), **no SMS sent**.
+  `OTP_MOCK` kept `true` as the committed default. ⚠️ remaining: circuit breaker.
 
-- [ ] ⚠️ T7  `OTPAttempt` table semantics — the live `OTPAttempt` Prisma table
+- [x] ⚠️ T7  `OTPAttempt` table semantics — the live `OTPAttempt` Prisma table
   requires a `userId` FK to `User`, but OTP-first REGISTRATION has no User yet,
   so the authoritative OTP state lives in the phone-keyed Redis store (the design
   the contract documents). A best-effort LOGIN audit row is written to
-  `OTPAttempt` after a successful login. Full audit-mirror semantics + a
-  rate-limit middleware (OTP-SEND/OTP-VERIFY categories) are not yet wired.
+  `OTPAttempt` after a successful login. The OTP **rate-limit middleware is now
+  wired** (OTP-SEND 3/10min/phone on `/otp/send`+`/otp/resend`, OTP-VERIFY
+  10/10min/phone on `/otp/verify` — Redis-backed, `packages/http`; live-smoke
+  verified the 4th send → 429 `otp_send_rate_limited`). ⚠️ remaining (honest):
+  full `OTPAttempt` audit-mirror semantics.
 
 ## Recommended skill
 ▶ `/build-to-contract` ✅ — builds OTP service from the Twilio integration
@@ -210,3 +220,34 @@ Twilio Verify call is a swappable interface; only the mock adapter is built.
   (not in the canonical contract; no queue/DLQ in this build).
 - Honest `⚠️` retained: real Twilio Verify adapter (needs creds); full
   `OTPAttempt` audit-mirror + OTP rate-limit middleware not yet wired.
+
+---
+
+## Execution Note — 2026-06-27 (adapters)
+
+Wired the **real Twilio Verify** delivery adapter behind a swappable `OtpProvider`
+boundary in `packages/auth-core`:
+- `otp-provider.ts` — the `OtpProvider` interface + `MockOtpProvider` (wraps the
+  existing `OtpStateMachine`, the OTP_MOCK path; the only mode returning `mockCode`).
+- `twilio-verify.ts` — `TwilioVerifyProvider` (Twilio owns the code lifecycle;
+  tracks `purpose`+`resendCount` in a tiny phone-keyed side record so the route can
+  still branch REGISTRATION/LOGIN). Pure `mapVerifyOutcome` does the canonical
+  mapping: approved→ok, pending→`otp_invalid` 422, 60200→`otp_expired` 410,
+  60202→`max_attempts_exceeded` 429, 20404→`otp_expired`.
+- `twilio-client.ts` — builds the live SDK surface (`verify.v2.services(SID)`)
+  and `fetchVerifyService()` (creds proof, no SMS).
+- `runtime.ts` selects the provider by `OTP_MOCK` (true→mock, false→twilio) and is
+  default-safe (incomplete creds → mock fallback, logged). `OTP_MOCK` stays `true`
+  as the committed default.
+
+Env added to `packages/config` + `.env.example` (placeholders): the Twilio keys
+already existed; rate-limit `RATE_LIMIT_ENABLED` added.
+
+**Verification**
+- `pnpm -r exec tsc --noEmit` → 0; full suite **104 passed** (76 + 28 new; auth-core
+  +11 Twilio-mapping/provider tests).
+- LIVE SMOKE (no SMS): `verify.v2.services(SID).fetch()` → friendlyName
+  "Easy Rates OTP", SID present (VA…), `sentSms:false`.
+- OTP rate-limit middleware wired on `/otp/send`,`/otp/resend` (OTP-SEND 3/10min)
+  and `/otp/verify` (OTP-VERIFY 10/10min); live Redis smoke: 4th send →
+  429 `otp_send_rate_limited`.

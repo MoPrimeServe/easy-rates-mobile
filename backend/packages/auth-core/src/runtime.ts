@@ -5,6 +5,9 @@ import type { KvStore } from "./store.js";
 import { MemoryKvStore } from "./store.js";
 import { RedisKvStore, getRedis, pingRedis } from "./redis-store.js";
 import { OtpStateMachine } from "./otp-state.js";
+import { MockOtpProvider, type OtpProvider } from "./otp-provider.js";
+import { TwilioVerifyProvider } from "./twilio-verify.js";
+import { createTwilioVerifyApi } from "./twilio-client.js";
 import { RegistrationTokenService, TokenService } from "./tokens.js";
 
 /**
@@ -20,11 +23,13 @@ function loadPem(inline: string | undefined, path: string): string {
 }
 
 export type StoreBackend = "redis" | "memory";
+export type OtpDriver = "mock" | "twilio";
 
 export interface AuthCoreRuntime {
   store: KvStore;
   storeBackend: StoreBackend;
-  otp: OtpStateMachine;
+  otp: OtpProvider;
+  otpDriver: OtpDriver;
   tokens: TokenService;
   registrationTokens: RegistrationTokenService;
 }
@@ -51,14 +56,47 @@ export async function createAuthCoreRuntime(): Promise<AuthCoreRuntime> {
     );
   }
 
-  const otp = new OtpStateMachine(store, {
+  // OTP delivery provider selection (default-safe). OTP_MOCK=true → the
+  // in-process state machine (no SMS). OTP_MOCK=false → Twilio Verify, but only
+  // when the three creds are present; if any is missing we log loudly and fall
+  // back to mock so a misconfigured env never hard-fails OTP.
+  const otpParams = {
     ttlSeconds: env.OTP_TTL_SECONDS,
     resendCooldownSeconds: env.OTP_RESEND_COOLDOWN_SECONDS,
     maxResends: env.OTP_MAX_RESENDS_PER_SESSION,
     maxAttempts: env.OTP_MAX_INVALID_ATTEMPTS,
-    codePepper: env.ID_NUMBER_HMAC_PEPPER, // reuse the keyed pepper for code hashing
-    mock: env.OTP_MOCK,
-  });
+  };
+  const twilioReady =
+    Boolean(env.TWILIO_ACCOUNT_SID) &&
+    Boolean(env.TWILIO_AUTH_TOKEN) &&
+    Boolean(env.TWILIO_SERVICE_SID);
+
+  let otp: OtpProvider;
+  let otpDriver: OtpDriver;
+  if (!env.OTP_MOCK && twilioReady) {
+    const api = createTwilioVerifyApi({
+      accountSid: env.TWILIO_ACCOUNT_SID!,
+      authToken: env.TWILIO_AUTH_TOKEN!,
+      serviceSid: env.TWILIO_SERVICE_SID!,
+    });
+    otp = new TwilioVerifyProvider(api, store, otpParams);
+    otpDriver = "twilio";
+    console.log("[auth-core] OTP delivery: Twilio Verify (real SMS).");
+  } else {
+    if (!env.OTP_MOCK && !twilioReady) {
+      console.warn(
+        "[auth-core] OTP_MOCK=false but Twilio creds are incomplete — " +
+          "falling back to the mock OTP provider (no SMS).",
+      );
+    }
+    const machine = new OtpStateMachine(store, {
+      ...otpParams,
+      codePepper: env.ID_NUMBER_HMAC_PEPPER, // reuse the keyed pepper for code hashing
+      mock: true,
+    });
+    otp = new MockOtpProvider(machine);
+    otpDriver = "mock";
+  }
 
   const tokens = new TokenService(store, {
     privateKeyPem: loadPem(env.JWT_PRIVATE_KEY_PEM, env.JWT_PRIVATE_KEY_PEM_PATH),
@@ -74,6 +112,6 @@ export async function createAuthCoreRuntime(): Promise<AuthCoreRuntime> {
     env.REGISTRATION_TOKEN_TTL_SECONDS,
   );
 
-  cached = { store, storeBackend, otp, tokens, registrationTokens };
+  cached = { store, storeBackend, otp, otpDriver, tokens, registrationTokens };
   return cached;
 }

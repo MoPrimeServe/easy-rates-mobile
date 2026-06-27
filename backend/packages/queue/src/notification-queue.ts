@@ -1,16 +1,25 @@
 import { Queue, Worker, type ConnectionOptions, type Job } from "bullmq";
 import { prisma } from "@easyrates/db";
 import { getQueueConnection } from "./connection.js";
+import { selectPushProvider } from "./push-provider.js";
 
 /**
  * notification queue — the async dispatch path for an already-persisted
  * Notification row (the row is the source of truth; PUSH/SMS/EMAIL are a wake
  * hint, dispatched out-of-band). A producer enqueues the row id; the worker
- * marks it SENT and mock-sends the push.
- *
- * Real FCM/Twilio/Postmark adapters are post-MVP — the worker stubs the send
- * with a structured log so the lifecycle is observable end-to-end.
+ * marks it SENT and dispatches the push via the selected PushProvider (real FCM
+ * when a credential is present, else a structured-log mock — see push-provider.ts).
  */
+
+/** Server-composed push copy per Notification type (mirrors the inbox COPY). */
+const PUSH_COPY: Record<string, { title: string; body: string }> = {
+  BILL_ISSUED: { title: "A new bill is available", body: "Your latest municipal bill is ready to view." },
+  PAYMENT_DUE: { title: "Payment due soon", body: "A payment deadline on your account is approaching." },
+  OBJECTION_STATUS: { title: "Your objection status changed", body: "The municipality has updated your objection." },
+  OBJECTION_RECEIVED: { title: "Objection received", body: "We have logged your objection; it is now under review." },
+  MORE_INFO_REQUESTED: { title: "More information requested", body: "Additional documents are needed for your objection." },
+  KYC_STATUS: { title: "Identity verification update", body: "There is an update on your identity verification." },
+};
 export const NOTIFICATION_QUEUE_NAME = "notification";
 
 export interface NotificationJobData {
@@ -79,12 +88,36 @@ export async function processNotificationJob(
     return;
   }
 
-  // Mock push send — real FCM/Twilio/Postmark adapters are post-MVP.
+  // Dispatch the push via the selected provider (FCM or mock). Only PUSH-channel
+  // rows with a device token get a real push; the persisted row is authoritative
+  // regardless, so a missing token / push failure must not fail the job.
   const token = notification.user.deviceToken;
-  console.log(
-    `[queue:notification] mock-send ${notification.channel} type=${notification.type} ` +
-      `to user=${notification.userId} token=${token ? "present" : "none"}`,
-  );
+  if (notification.channel === "PUSH" && token) {
+    const copy = PUSH_COPY[notification.type] ?? {
+      title: "Notification",
+      body: "You have a new notification.",
+    };
+    try {
+      const push = await selectPushProvider();
+      await push.send({
+        token,
+        title: copy.title,
+        body: copy.body,
+        data: { notificationId: notification.id, type: notification.type },
+      });
+    } catch (e) {
+      // Push is a wake-hint — log and continue; the row still flips to SENT.
+      console.warn(
+        `[queue:notification] push dispatch failed for ${notification.id}:`,
+        (e as Error).message,
+      );
+    }
+  } else {
+    console.log(
+      `[queue:notification] no push (channel=${notification.channel} token=${token ? "present" : "none"}) ` +
+        `type=${notification.type} user=${notification.userId}`,
+    );
+  }
 
   // The persisted row is the source of truth — flip it to SENT (dispatched).
   await prisma.notification.update({

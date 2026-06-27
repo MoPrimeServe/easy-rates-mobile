@@ -148,3 +148,31 @@ real dead-letter inspection surface.
 
 Verified: `pnpm -r exec tsc --noEmit` → 0; the objection submit + municipality webhook smoke
 drove publish → consume → row-update end-to-end against live Redis + Postgres.
+
+---
+
+## Execution Note — 2026-06-27 (adapters)
+
+Added the **Redis-backed rate-limiter** (conventions §5) as a shared middleware in
+`packages/http` (`rate-limit.ts`), wired across services.
+- Categories (limit / window / key): OTP-SEND 3/10min/phone, OTP-VERIFY
+  10/10min/phone, AUTH 10/15min/IP, READ 60/min/user, WRITE 20/hour/user,
+  SUBMIT 5/24h/user. Fixed-window counter (`RedisCounterStore` INCR+EXPIRE),
+  with an in-memory fallback. Emits `RateLimit-Limit/Remaining/Reset` on every
+  request and `Retry-After` + `429 rate_limit_exceeded` (OTP categories use the
+  OTP-specific codes `otp_send_rate_limited` / `otp_verify_rate_limited`) when
+  exhausted. Default-safe: `RATE_LIMIT_ENABLED=false` disables it; Redis down →
+  fails open (logged once). `RATE_LIMIT_ENABLED` added to `packages/config` +
+  `.env.example`.
+- Wired: otp (`/otp/send`,`/otp/resend`→OTP-SEND; `/otp/verify`→OTP-VERIFY),
+  auth (`/auth/register/start|register|login|refresh`→AUTH), objection
+  (draft/evidence→WRITE, submit→SUBMIT, list/status→READ), property/bill/account
+  reads→READ, account prefs PUT→WRITE, notification (inbox→READ; mutations→WRITE).
+
+**Verification**
+- `pnpm -r exec tsc --noEmit` → 0; full suite **104 passed** (http +7 rate-limit
+  tests: `computeHeaders`, the §5 rule table, per-identity counting, headers,
+  429 emission, identity-absent skip).
+- LIVE Redis smoke (`RedisCounterStore`, OTP-SEND): hits 1–3 allowed (Remaining
+  2→1→0, Reset 600), 4th → 429 `otp_send_rate_limited` with `Retry-After`.
+- Honest ⚠️ still: per-route source-IP allowlist, AuditEvent emission on 429.

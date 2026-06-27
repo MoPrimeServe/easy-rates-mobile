@@ -9,6 +9,7 @@ import {
   makeHealthHandler,
   notFoundMiddleware,
   ok,
+  rateLimit,
 } from "@easyrates/http";
 import { prisma } from "@easyrates/db";
 import {
@@ -117,6 +118,7 @@ export function createObjectionApp(rt: AuthCoreRuntime): Express {
   app.post(
     "/objections/draft",
     requireAuth(rt.tokens),
+    rateLimit("WRITE"),
     asyncHandler(async (req: AuthedRequest, res) => {
       const body = parseOrValidationError(draftSchema, req.body);
       const municipalityId = await callerMunicipalityId(req);
@@ -214,6 +216,7 @@ export function createObjectionApp(rt: AuthCoreRuntime): Express {
   app.post(
     "/objections/:id/evidence",
     requireAuth(rt.tokens),
+    rateLimit("WRITE"),
     upload.single("file"),
     asyncHandler(async (req: AuthedRequest, res) => {
       const objection = await ownedObjectionById(req, req.params.id!);
@@ -297,6 +300,7 @@ export function createObjectionApp(rt: AuthCoreRuntime): Express {
   app.post(
     "/objections/:id/submit",
     requireAuth(rt.tokens),
+    rateLimit("SUBMIT"),
     asyncHandler(async (req: AuthedRequest, res) => {
       const objection = await ownedObjectionById(req, req.params.id!);
 
@@ -340,6 +344,7 @@ export function createObjectionApp(rt: AuthCoreRuntime): Express {
   app.get(
     "/objections",
     requireAuth(rt.tokens),
+    rateLimit("READ"),
     asyncHandler(async (req: AuthedRequest, res) => {
       const { page, pageSize, status } = parseOrValidationError(
         listQuerySchema,
@@ -409,6 +414,7 @@ export function createObjectionApp(rt: AuthCoreRuntime): Express {
   app.get(
     "/objections/:ref/status",
     requireAuth(rt.tokens),
+    rateLimit("READ"),
     asyncHandler(async (req: AuthedRequest, res) => {
       const objection = await prisma.objection.findFirst({
         where: { refNumber: req.params.ref, deletedAt: null },

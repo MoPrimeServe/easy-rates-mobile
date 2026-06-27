@@ -8,6 +8,7 @@ import {
   makeHealthHandler,
   notFoundMiddleware,
   ok,
+  rateLimit,
 } from "@easyrates/http";
 import { prisma } from "@easyrates/db";
 import {
@@ -87,6 +88,7 @@ export function createPropertyApp(rt: AuthCoreRuntime): Express {
   app.post(
     "/property/search/account",
     requireAuth(rt.tokens),
+    rateLimit("READ"),
     asyncHandler(async (req: AuthedRequest, res) => {
       const { accountNumber } = parseOrValidationError(
         searchAccountSchema,
@@ -117,6 +119,7 @@ export function createPropertyApp(rt: AuthCoreRuntime): Express {
   app.post(
     "/property/search/address",
     requireAuth(rt.tokens),
+    rateLimit("READ"),
     asyncHandler(async (req: AuthedRequest, res) => {
       const body = parseOrValidationError(searchAddressSchema, req.body);
       const idHash = await callerIdHash(req);
@@ -149,6 +152,7 @@ export function createPropertyApp(rt: AuthCoreRuntime): Express {
   app.get(
     "/property/:id",
     requireAuth(rt.tokens),
+    rateLimit("READ"),
     asyncHandler(async (req: AuthedRequest, res) => {
       const idHash = await callerIdHash(req);
       const property = await prisma.property.findUnique({

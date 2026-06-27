@@ -9,7 +9,7 @@ async function main(): Promise<void> {
   const app = createOtpApp(rt);
   app.listen(PORT, () => {
     console.log(
-      `[otp-service] listening on :${PORT} (store=${rt.storeBackend}, mock=${env.OTP_MOCK})`,
+      `[otp-service] listening on :${PORT} (store=${rt.storeBackend}, otp=${rt.otpDriver})`,
     );
   });
 }
