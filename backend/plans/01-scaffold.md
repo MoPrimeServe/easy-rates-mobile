@@ -241,3 +241,30 @@ Gate: checks 1–6 must pass before T6 (stack up). Check 7 runs only after
 **Still open (genuinely needs the container stack):** T6 (live `/health` 200s) and
 T7 (human commit). The 9 `apps/<svc>` entrypoints + Dockerfiles are built by the
 service plans (03–06); only then can the full stack come up.
+
+---
+
+### New infra (2026-06-28): API gateway — `apps/gateway`
+
+Added outside the original scaffold scope. A thin reverse proxy (Express +
+`http-proxy-middleware` v3) that gives the Flutter app the **single origin** that
+conventions §1 mandates: all traffic hits `http://<host>:8080/api/v1` and the
+gateway dispatches by first path segment to the 8 service apps, **stripping the
+`/api/v1` prefix** before forwarding (services serve canonical paths without it,
+e.g. `/auth/login`, `/bills`). Special-case: `/.well-known/jwks.json` routes to
+auth. Downstream-down yields a clean `502 { code: "service_unavailable" }` in the
+`{data,error}` envelope; gateway `/health` aggregates downstream `/health`
+best-effort. Listens on `GATEWAY_PORT` (default 8080).
+
+- Added: `apps/gateway/{package.json,tsconfig.json,src/{routes.ts,app.ts,server.ts}}`.
+- Config: `GATEWAY_PORT` + per-service `*_URL` keys in `packages/config` +
+  `.env.example` + `.env`. Compose: `gateway` service on `8080:3000`, `*_URL`
+  pointing at compose service names (`http://auth:3000`, …).
+- Verified: `pnpm -r exec tsc --noEmit` → exit 0; live curl-through-gateway smoke
+  (auth + otp + gateway on real ports) → register/start 202, jwks 200, login 200,
+  bad-phone 400 `validation_error`, property-down 502 `service_unavailable`.
+- Note: bill and objection both default to PORT 3005 in `server.ts`; locally
+  objection is pinned to 3006 (`OBJECTION_PORT`/`OBJECTION_URL`) to deconflict.
+  In compose this is moot (every container listens on :3000 internally).
+- Flutter base URL: `http://localhost:8080/api/v1` (Android emulator:
+  `http://10.0.2.2:8080/api/v1`).

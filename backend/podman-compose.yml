@@ -180,6 +180,42 @@ services:
     restart: unless-stopped
 
   # ===========================================================================
+  # API GATEWAY (apps/gateway) — the single origin (conventions §1).
+  # The Flutter app talks ONLY to http://<host>:8080/api/v1; the gateway
+  # reverse-proxies /api/v1/<service>/* to each service, STRIPPING /api/v1.
+  # On the compose network each service listens on :3000, addressed by its
+  # service name — so the *_URL values point at http://<service>:3000.
+  # ===========================================================================
+  gateway:
+    build: { context: ., dockerfile: apps/gateway/Dockerfile }
+    networks: [easyrates_net]
+    env_file: .env
+    environment:
+      <<: *app-env
+      SERVICE_NAME: gateway
+      GATEWAY_PORT: 3000
+      AUTH_URL: http://auth:3000
+      OTP_URL: http://otp:3000
+      PROPERTY_URL: http://property:3000
+      BILL_URL: http://bill:3000
+      OBJECTION_URL: http://objection:3000
+      NOTIFICATION_URL: http://notification:3000
+      MUNICIPALITY_URL: http://municipality:3000
+      ACCOUNT_URL: http://account:3000
+    ports: ["8080:3000"]
+    depends_on:
+      auth: { condition: service_started }
+      otp: { condition: service_started }
+      property: { condition: service_started }
+      bill: { condition: service_started }
+      account: { condition: service_started }
+      objection: { condition: service_started }
+      notification: { condition: service_started }
+      municipality: { condition: service_started }
+    healthcheck: *node-healthcheck
+    restart: unless-stopped
+
+  # ===========================================================================
   # DEV-ONLY (profile: dev — `--profile dev` to enable)
   # ===========================================================================
 

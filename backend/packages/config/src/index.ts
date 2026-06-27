@@ -105,6 +105,22 @@ const envSchema = z.object({
   // Service base URLs for cross-service calls (auth → otp).
   OTP_SERVICE_URL: z.string().default("http://localhost:3002"),
 
+  // ---- API gateway (apps/gateway) ------------------------------------------
+  // The gateway is the single origin (conventions §1): the Flutter app talks to
+  // http://<host>:GATEWAY_PORT/api/v1 and the gateway reverse-proxies to the 8
+  // service apps, stripping the /api/v1 prefix. The *_URL defaults match each
+  // service's server.ts fallback PORT (objection is run on 3006 in local dev to
+  // avoid colliding with bill on 3005 — set OBJECTION_PORT=3006 in .env).
+  GATEWAY_PORT: portSchema.default(8080),
+  AUTH_URL: z.string().default("http://localhost:3001"),
+  OTP_URL: z.string().default("http://localhost:3002"),
+  PROPERTY_URL: z.string().default("http://localhost:3003"),
+  BILL_URL: z.string().default("http://localhost:3005"),
+  OBJECTION_URL: z.string().default("http://localhost:3006"),
+  NOTIFICATION_URL: z.string().default("http://localhost:3007"),
+  MUNICIPALITY_URL: z.string().default("http://localhost:3008"),
+  ACCOUNT_URL: z.string().default("http://localhost:3009"),
+
   // ADR-003 ID-number HMAC pepper
   ID_NUMBER_HMAC_PEPPER: z
     .string()

@@ -27,6 +27,12 @@ dependencies:
   # Utilities
   cupertino_icons: ^1.0.8
 
+  # HTTP client for the live backend (Dio-based api_client)
+  dio: ^5.7.0
+
+  # Secure storage for the opaque refresh token (access token stays in memory)
+  flutter_secure_storage: ^9.2.2
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
