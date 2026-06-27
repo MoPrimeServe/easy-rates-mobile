@@ -37,6 +37,31 @@ describe("TokenService", () => {
     expect(claims.sub).toBe("user_123");
   });
 
+  it("stamps the kid into the access-token header when keyId is set, still verifiable", async () => {
+    const s = new TokenService(new MemoryKvStore(), {
+      ...CFG,
+      keyId: "kid-abc",
+    });
+    const token = s.signAccessToken("user_123");
+    const headerJson = Buffer.from(
+      token.split(".")[0]!,
+      "base64url",
+    ).toString("utf8");
+    const header = JSON.parse(headerJson) as { alg: string; kid?: string };
+    expect(header.alg).toBe("RS256");
+    expect(header.kid).toBe("kid-abc");
+    // Verification still works with a kid present.
+    expect(s.verifyAccessToken(token).sub).toBe("user_123");
+  });
+
+  it("omits kid when keyId is not configured (back-compat)", () => {
+    const token = svc().signAccessToken("user_123");
+    const header = JSON.parse(
+      Buffer.from(token.split(".")[0]!, "base64url").toString("utf8"),
+    ) as { kid?: string };
+    expect(header.kid).toBeUndefined();
+  });
+
   it("rotates the refresh token (single-use): old token rejected, new accepted", async () => {
     const s = svc();
     const pair = await s.issueSession("user_123");

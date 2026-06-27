@@ -9,6 +9,7 @@ import {
   notFoundMiddleware,
   ok,
   rateLimit,
+  writeAudit,
 } from "@easyrates/http";
 import { Prisma, prisma } from "@easyrates/db";
 import { env } from "@easyrates/config";
@@ -63,6 +64,15 @@ export function createAuthApp(rt: AuthCoreRuntime): Express {
       pingQueue: async () => rt.storeBackend === "redis",
     }),
   );
+
+  // ---- GET /.well-known/jwks.json  [public] --------------------------------
+  // Publishes the RS256 public key as a JWK set so any service / external
+  // verifier can validate access tokens by their `kid` (plan 03 T11). NOT the
+  // `{data,error}` envelope — this is the IETF-standard JWKS shape (RFC 7517),
+  // which JWKS clients expect verbatim.
+  app.get("/.well-known/jwks.json", (_req, res) => {
+    res.status(200).json(rt.jwks);
+  });
 
   // ---- POST /auth/register/start  [public] ---------------------------------
   app.post(
@@ -229,6 +239,15 @@ export function createAuthApp(rt: AuthCoreRuntime): Express {
       const user = await prisma.user.update({
         where: { id: req.userId },
         data: { kycStatus: "SUBMITTED", kycDocumentKey },
+      });
+      // POPIA audit: a KYC document was uploaded (no PII — userId + masked key).
+      await writeAudit({
+        event: "KYC_DOCUMENT_UPLOADED",
+        userId: req.userId,
+        entityId: user.id,
+        entityType: "User",
+        ip: req.ip,
+        metadata: { mimeType: file.mimetype },
       });
       res.status(201).json(
         ok({

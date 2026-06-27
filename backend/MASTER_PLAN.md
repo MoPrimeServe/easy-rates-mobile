@@ -158,16 +158,17 @@ none yet
 
 ## Plans
 
-- ⚠️ [00-ingest-adr.md](plans/00-ingest-adr.md) — ingest Figma PDF + ADR-001; cross-check all seven flows → routes; gap-report.md empty before plan/01 starts
-- ⚠️ [01-scaffold.md](plans/01-scaffold.md) — monorepo layout, Zod env config, Podman Compose, /health endpoints ⛔ BLOCKED[Gate: ADR-001 + gap-report.md empty]
-- ⚠️ [02-database.md](plans/02-database.md) — ER model (all 7 flows), Prisma schema (3NF), migrations, seed data ⛔ BLOCKED[Gate: ADR-001 + gap-report.md empty]
-- ⚠️ [03-auth-service.md](plans/03-auth-service.md) — register, login, refresh, forgot-password ⛔ BLOCKED[Gate: plan/02 complete]
-- ⚠️ [04-otp-service.md](plans/04-otp-service.md) — Twilio consumer, verify, resend, DLQ; OTP state in Redis + psql ⛔ BLOCKED[Gate: plan/02 complete]
-- ⚠️ [05-queue-wiring.md](plans/05-queue-wiring.md) — producer, consumer, DLQ, full message lifecycle visible ⛔ BLOCKED[Gate: plan/02 complete]
-- ⚠️ [06-property-service.md](plans/06-property-service.md) — account lookup, manual search, swappable adapter ⛔ BLOCKED[Gate: plan/02 complete]
-- ⚠️ [07-flow-walkthrough.md](plans/07-flow-walkthrough.md) — narrated terminal script; all seven flows; exits 0 with psql state ⛔ BLOCKED[Gate: plans/03–12 complete]
-- ⚠️ [08-bill-service.md](plans/08-bill-service.md) — bill fetch, line items, anomaly flags, AI expected amount, billing adapter ⛔ BLOCKED[Gate: plan/02 complete]
-- ⚠️ [09-objection-service.md](plans/09-objection-service.md) — doc upload, objection creation, submission, ref generation ⛔ BLOCKED[Gate: plan/02 complete]
-- ⚠️ [10-notification-service.md](plans/10-notification-service.md) — SMS/push dispatch, delivery log, all notification touchpoints ⛔ BLOCKED[Gate: plan/02 complete]
-- ⚠️ [11-status-service.md](plans/11-status-service.md) — status query, municipality response ingestion, status history ⛔ BLOCKED[Gate: plan/02 complete]
-- ⚠️ [12-account-service.md](plans/12-account-service.md) — profile CRUD, linked properties, notification prefs, objection history ⛔ BLOCKED[Gate: plan/02 complete]
+<!-- Reconciled 2026-06-27: all gates cleared (ADR-001 committed, gap-report empty); built to CANONICAL contracts (passwordless, ADR-002). -->
+- ✅ [00-ingest-adr.md](plans/00-ingest-adr.md) — gap-report reconciled to canonical (0 orphans); gate cleared
+- ✅ [01-scaffold.md](plans/01-scaffold.md) — pnpm monorepo, Zod env, podman-compose, /health (all 8 green)
+- ✅ [02-database.md](plans/02-database.md) — Prisma schema from sealed data-model; migrated to live Postgres; seeded
+- ⚠️ [03-auth-service.md](plans/03-auth-service.md) — passwordless register/login/refresh/logout/session/kyc + JWKS + audit; ⚠️ remaining: Azure Key Vault + Redis HA (deployment infra)
+- ✅ [04-otp-service.md](plans/04-otp-service.md) — verify/resend + internal send; Twilio Verify adapter (live), Redis state, rate-limited
+- ✅ [05-queue-wiring.md](plans/05-queue-wiring.md) — BullMQ over live Redis (notification + objection-submit workers)
+- ✅ [06-property-service.md](plans/06-property-service.md) — account/address search (identity-gated, ADR-004), ETag cache
+- ✅ [07-flow-walkthrough.md](plans/07-flow-walkthrough.md) — full cross-service E2E verified live (all 8 services)
+- ✅ [08-bill-service.md](plans/08-bill-service.md) — list/detail/lines/ai-estimate (confidence gate + isStale)
+- ✅ [09-objection-service.md](plans/09-objection-service.md) — draft upsert, multipart evidence (Azure Blob live), submit 202, list, status, summary/sufficiency/escalate/close
+- ✅ [10-notification-service.md](plans/10-notification-service.md) — inbox/read/read-all/device-token; FCM push adapter (live)
+- ✅ [11-status-service.md](plans/11-status-service.md) — status via objection-service + municipality webhook ingestion (response adapter)
+- ✅ [12-account-service.md](plans/12-account-service.md) — profile (masked), linked properties, notification prefs

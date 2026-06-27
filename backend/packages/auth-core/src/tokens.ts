@@ -25,6 +25,12 @@ export interface TokenConfig {
   audience: string;
   accessTtlSeconds: number; // 900
   refreshTtlDays: number; // 30
+  /**
+   * Key id stamped into the access-token header (`kid`). Optional for back-compat;
+   * when set, the JWKS published at `/.well-known/jwks.json` is usable by external
+   * verifiers (they select the public key by this kid).
+   */
+  keyId?: string;
 }
 
 export interface AccessClaims {
@@ -71,6 +77,8 @@ export class TokenService {
       issuer: this.cfg.issuer,
       audience: this.cfg.audience,
       expiresIn: this.cfg.accessTtlSeconds,
+      // Stamp the `kid` so a verifier can select the public key from the JWKS.
+      ...(this.cfg.keyId ? { keyid: this.cfg.keyId } : {}),
     });
   }
 

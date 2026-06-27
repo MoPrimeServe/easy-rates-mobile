@@ -119,6 +119,9 @@ importers:
 
   apps/municipality:
     dependencies:
+      '@easyrates/adapters':
+        specifier: workspace:*
+        version: link:../../packages/adapters
       '@easyrates/auth-core':
         specifier: workspace:*
         version: link:../../packages/auth-core
@@ -305,6 +308,22 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@26.0.1)
 
+  packages/adapters:
+    dependencies:
+      '@easyrates/db':
+        specifier: workspace:*
+        version: link:../db
+    devDependencies:
+      '@types/node':
+        specifier: ^26.0.1
+        version: 26.0.1
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@26.0.1)
+
   packages/auth-core:
     dependencies:
       '@easyrates/config':
@@ -404,12 +423,18 @@ importers:
 
   packages/queue:
     dependencies:
+      '@easyrates/adapters':
+        specifier: workspace:*
+        version: link:../adapters
       '@easyrates/config':
         specifier: workspace:*
         version: link:../config
       '@easyrates/db':
         specifier: workspace:*
         version: link:../db
+      '@easyrates/http':
+        specifier: workspace:*
+        version: link:../http
       bullmq:
         specifier: ^5.34.0
         version: 5.79.1

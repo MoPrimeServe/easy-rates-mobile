@@ -11,6 +11,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@easyrates/adapters": "workspace:*",
     "@easyrates/auth-core": "workspace:*",
     "@easyrates/config": "workspace:*",
     "@easyrates/db": "workspace:*",

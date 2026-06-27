@@ -186,6 +186,94 @@ export function toObjectionSummary(args: {
   };
 }
 
+// ---- Sufficiency (GET /objections/:id/sufficiency) -------------------------
+
+export interface SufficiencyMissingEntry {
+  category: ObjectionCategory;
+  requiredDocTypes: string[];
+}
+
+export interface ObjectionSufficiencyResponse {
+  objectionId: string;
+  sufficient: boolean;
+  missing: SufficiencyMissingEntry[];
+}
+
+/**
+ * Rule-based evidence requirements per dispute category (MVP — AI content
+ * verification is post-MVP, per the contract). Each category lists the doc
+ * types the user is expected to attach; `minDocs` is the minimum file count
+ * that satisfies the rule for the MVP.
+ */
+export const SUFFICIENCY_RULES: Record<
+  ObjectionCategory,
+  { requiredDocTypes: string[]; minDocs: number }
+> = {
+  WRONG_METER_READING: {
+    requiredDocTypes: ["meter_photo", "previous_reading"],
+    minDocs: 1,
+  },
+  INCORRECT_TARIFF: { requiredDocTypes: ["tariff_proof"], minDocs: 1 },
+  PROPERTY_NOT_OCCUPIED: {
+    requiredDocTypes: ["vacancy_proof"],
+    minDocs: 1,
+  },
+  DUPLICATE_OTHER: { requiredDocTypes: ["supporting_document"], minDocs: 1 },
+};
+
+/**
+ * Decide whether the attached evidence is sufficient for the category. Pure so
+ * the rule is testable without a DB. `sufficient = true` → `missing` is empty;
+ * `false` → `missing` carries the one entry for this objection's category.
+ */
+export function evaluateSufficiency(args: {
+  objectionId: string;
+  category: ObjectionCategory;
+  evidenceCount: number;
+}): ObjectionSufficiencyResponse {
+  const rule = SUFFICIENCY_RULES[args.category];
+  const sufficient = args.evidenceCount >= rule.minDocs;
+  return {
+    objectionId: args.objectionId,
+    sufficient,
+    missing: sufficient
+      ? []
+      : [{ category: args.category, requiredDocTypes: rule.requiredDocTypes }],
+  };
+}
+
+// ---- Summary (GET /objections/:id/summary) ---------------------------------
+
+export interface SummaryDocument {
+  evidenceId: string;
+  filename: string;
+  mimeType: string;
+}
+
+export interface ObjectionSummaryResponse {
+  objectionId: string;
+  property: { accountNumber: string; address: string };
+  billingPeriod: string;
+  disputedItems: DisputedItem[];
+  documents: SummaryDocument[];
+  totalDisputedAmount: string;
+}
+
+/** Confidence floor at/above which the AI estimate is surfaced as expectedAmount. */
+export const EXPECTED_AMOUNT_CONFIDENCE_FLOOR = 0.85;
+
+/**
+ * Resolve the AI-estimated `expectedAmount` for a disputed line item: the
+ * estimate is surfaced (as a 2dp decimal string) only when the AI calculation
+ * exists AND clears the confidence floor; otherwise it is null. Pure/testable.
+ */
+export function expectedAmountFromAi(
+  ai: { estimatedAmount: Prisma.Decimal | number | string; confidence: number } | null,
+): string | null {
+  if (!ai || ai.confidence < EXPECTED_AMOUNT_CONFIDENCE_FLOOR) return null;
+  return money(ai.estimatedAmount);
+}
+
 export function toEvidenceResponse(
   file: Pick<
     EvidenceFile,

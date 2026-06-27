@@ -58,6 +58,19 @@ export {
 } from "./twilio-client.js";
 export type { TwilioCreds } from "./twilio-client.js";
 
+// Signing-key boundary (KeyProvider) + JWKS
+export {
+  EnvKeyProvider,
+  AzureKeyVaultKeyProvider,
+  publicPemToJwk,
+} from "./key-provider.js";
+export type {
+  KeyProvider,
+  SigningKey,
+  PublicJwk,
+  Jwks,
+} from "./key-provider.js";
+
 // Runtime wiring
 export { createAuthCoreRuntime } from "./runtime.js";
 export type { AuthCoreRuntime, StoreBackend, OtpDriver } from "./runtime.js";

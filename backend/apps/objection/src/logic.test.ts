@@ -3,6 +3,8 @@ import {
   MAX_FILE_SIZE_BYTES,
   UPLOAD_CONFIG,
   decideDraftUpsert,
+  evaluateSufficiency,
+  expectedAmountFromAi,
   objectionTitle,
   validateEvidenceFile,
 } from "./logic.js";
@@ -116,5 +118,59 @@ describe("objectionTitle", () => {
     expect(objectionTitle(null, "12 Vaal Street, Vanderbijlpark")).toBe(
       "Objection — 12 Vaal Street",
     );
+  });
+});
+
+describe("evaluateSufficiency — rule-based MVP", () => {
+  it("is sufficient when evidence meets the category minimum (empty missing)", () => {
+    const r = evaluateSufficiency({
+      objectionId: "obj_1",
+      category: "WRONG_METER_READING",
+      evidenceCount: 1,
+    });
+    expect(r).toEqual({ objectionId: "obj_1", sufficient: true, missing: [] });
+  });
+
+  it("is insufficient with no evidence, surfacing the category's required doc types", () => {
+    const r = evaluateSufficiency({
+      objectionId: "obj_1",
+      category: "WRONG_METER_READING",
+      evidenceCount: 0,
+    });
+    expect(r.sufficient).toBe(false);
+    expect(r.missing).toEqual([
+      {
+        category: "WRONG_METER_READING",
+        requiredDocTypes: ["meter_photo", "previous_reading"],
+      },
+    ]);
+  });
+
+  it("covers every ObjectionCategory in the rules table", () => {
+    for (const category of [
+      "WRONG_METER_READING",
+      "INCORRECT_TARIFF",
+      "PROPERTY_NOT_OCCUPIED",
+      "DUPLICATE_OTHER",
+    ] as const) {
+      const r = evaluateSufficiency({ objectionId: "o", category, evidenceCount: 0 });
+      expect(r.sufficient).toBe(false);
+      expect(r.missing[0]!.requiredDocTypes.length).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("expectedAmountFromAi — confidence floor 0.85", () => {
+  it("surfaces the estimate as a 2dp string at/above the floor", () => {
+    expect(expectedAmountFromAi({ estimatedAmount: "620", confidence: 0.85 })).toBe(
+      "620.00",
+    );
+    expect(expectedAmountFromAi({ estimatedAmount: 620.5, confidence: 0.99 })).toBe(
+      "620.50",
+    );
+  });
+  it("returns null below the floor or when no estimate exists", () => {
+    expect(expectedAmountFromAi({ estimatedAmount: "620", confidence: 0.5 })).toBeNull();
+    expect(expectedAmountFromAi(null)).toBeNull();
   });
 });

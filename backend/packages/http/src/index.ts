@@ -5,6 +5,8 @@ export { asyncHandler } from "./async-handler.js";
 export { errorMiddleware, notFoundMiddleware } from "./error-middleware.js";
 export { makeHealthHandler } from "./health.js";
 export type { HealthReport } from "./health.js";
+export { writeAudit } from "./audit.js";
+export type { WriteAuditArgs } from "./audit.js";
 export {
   rateLimit,
   computeHeaders,

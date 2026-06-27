@@ -8,11 +8,13 @@ import {
   notFoundMiddleware,
   ok,
   rateLimit,
+  writeAudit,
 } from "@easyrates/http";
 import { prisma } from "@easyrates/db";
 import { env } from "@easyrates/config";
 import {
   type AuthCoreRuntime,
+  maskPhone,
   parseOrValidationError,
   phoneSchema,
 } from "@easyrates/auth-core";
@@ -100,7 +102,20 @@ export function createOtpApp(rt: AuthCoreRuntime): Express {
     rateLimit("OTP-VERIFY"),
     asyncHandler(async (req, res) => {
       const { phone, code } = parseOrValidationError(verifySchema, req.body);
-      const { purpose } = await rt.otp.verify(phone, code);
+
+      let purpose: "REGISTRATION" | "LOGIN";
+      try {
+        ({ purpose } = await rt.otp.verify(phone, code));
+      } catch (err) {
+        // Wrong / expired / missing OTP. POPIA security event — no userId yet,
+        // no raw phone (masked only), no code persisted.
+        await writeAudit({
+          event: "LOGIN_FAILED",
+          ip: req.ip,
+          metadata: { maskedPhone: maskPhone(phone) },
+        });
+        throw err;
+      }
 
       if (purpose === "REGISTRATION") {
         // No User yet — return a single-use registrationToken.
@@ -122,6 +137,14 @@ export function createOtpApp(rt: AuthCoreRuntime): Express {
       }
       const pair = await rt.tokens.issueSession(user.id);
       await mirrorLoginAttempt(user.id);
+      // POPIA audit: a successful login (session minted) for this user.
+      await writeAudit({
+        event: "LOGIN_SUCCESS",
+        userId: user.id,
+        entityId: user.id,
+        entityType: "User",
+        ip: req.ip,
+      });
       res.status(200).json(
         ok({
           userId: pair.userId,

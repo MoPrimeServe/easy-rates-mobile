@@ -7,12 +7,14 @@ import {
   makeHealthHandler,
   notFoundMiddleware,
   ok,
+  writeAudit,
 } from "@easyrates/http";
 import { env } from "@easyrates/config";
 import { prisma, Prisma } from "@easyrates/db";
 import { getRedis } from "@easyrates/auth-core";
+import { getMunicipalityResponseAdapter } from "@easyrates/adapters";
 import { enqueueNotification, pingQueue } from "@easyrates/queue";
-import { classifyTransition, decideIdempotency, secretMatches } from "./logic.js";
+import { decideIdempotency, secretMatches } from "./logic.js";
 
 const IDEMPOTENCY_TTL_SECONDS = 30 * 24 * 60 * 60; // 30 days
 
@@ -69,7 +71,7 @@ export function createMunicipalityApp(): Express {
     requireWebhookSecret,
     asyncHandler(async (req: Request, res: Response) => {
       const body = parseWebhook(req.body);
-      const ref = req.params.ref;
+      const ref = req.params.ref!; // route param — always present
       const redis = getRedis(env.REDIS_URL);
       const dedupKey = `muni:idem:${body.idempotencyKey}`;
 
@@ -91,7 +93,27 @@ export function createMunicipalityApp(): Express {
         throw ApiError.notFound("No objection matches that refNumber.");
       }
 
-      const decision = classifyTransition(objection.status, body.status);
+      // POPIA audit: an inbound municipal response was received for this
+      // objection (recorded regardless of whether the transition is applied).
+      await writeAudit({
+        event: "MUNICIPALITY_RESPONSE_RECEIVED",
+        userId: objection.userId,
+        entityId: objection.id,
+        entityType: "Objection",
+        metadata: { refNumber: ref, requestedStatus: body.status },
+      });
+
+      // Ingest the response through the swappable MunicipalityResponseAdapter
+      // (default impl applies the locked four-value state machine).
+      const decision = getMunicipalityResponseAdapter().classify(
+        objection.status,
+        {
+          refNumber: ref,
+          status: body.status,
+          note: body.note,
+          adjustedAmount: body.adjustedAmount ?? null,
+        },
+      );
 
       // Step 1 — INSERT MunicipalityResponse for audit on EVERY call (even 409).
       const responseRow = {

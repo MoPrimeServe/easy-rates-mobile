@@ -9,6 +9,12 @@ import { MockOtpProvider, type OtpProvider } from "./otp-provider.js";
 import { TwilioVerifyProvider } from "./twilio-verify.js";
 import { createTwilioVerifyApi } from "./twilio-client.js";
 import { RegistrationTokenService, TokenService } from "./tokens.js";
+import {
+  AzureKeyVaultKeyProvider,
+  EnvKeyProvider,
+  type Jwks,
+  type KeyProvider,
+} from "./key-provider.js";
 
 /**
  * Wires env → KvStore → services. Resolves the OTP/session state store once:
@@ -32,6 +38,10 @@ export interface AuthCoreRuntime {
   otpDriver: OtpDriver;
   tokens: TokenService;
   registrationTokens: RegistrationTokenService;
+  /** The signing-key boundary (env-backed today; Azure Key Vault stubbed). */
+  keyProvider: KeyProvider;
+  /** The published JWK set — served at `GET /.well-known/jwks.json`. */
+  jwks: Jwks;
 }
 
 let cached: AuthCoreRuntime | null = null;
@@ -98,13 +108,31 @@ export async function createAuthCoreRuntime(): Promise<AuthCoreRuntime> {
     otpDriver = "mock";
   }
 
+  const privateKeyPem = loadPem(
+    env.JWT_PRIVATE_KEY_PEM,
+    env.JWT_PRIVATE_KEY_PEM_PATH,
+  );
+  const publicKeyPem = loadPem(
+    env.JWT_PUBLIC_KEY_PEM,
+    env.JWT_PUBLIC_KEY_PEM_PATH,
+  );
+
+  // Signing-key boundary. `env` loads the RS256 PEMs; `azure-key-vault` is a
+  // marked stub that throws (needs provisioned infra — see key-provider.ts).
+  const keyProvider: KeyProvider =
+    env.JWT_KEY_PROVIDER === "azure-key-vault"
+      ? new AzureKeyVaultKeyProvider()
+      : new EnvKeyProvider(privateKeyPem, publicKeyPem, env.JWT_SIGNING_KEY_ID);
+  const signingKey = keyProvider.getSigningKey();
+
   const tokens = new TokenService(store, {
-    privateKeyPem: loadPem(env.JWT_PRIVATE_KEY_PEM, env.JWT_PRIVATE_KEY_PEM_PATH),
-    publicKeyPem: loadPem(env.JWT_PUBLIC_KEY_PEM, env.JWT_PUBLIC_KEY_PEM_PATH),
+    privateKeyPem: signingKey.privateKeyPem,
+    publicKeyPem,
     issuer: env.JWT_ISSUER,
     audience: env.JWT_AUDIENCE,
     accessTtlSeconds: env.JWT_ACCESS_TTL_SECONDS,
     refreshTtlDays: env.JWT_REFRESH_TTL_DAYS,
+    keyId: signingKey.kid,
   });
 
   const registrationTokens = new RegistrationTokenService(
@@ -112,6 +140,15 @@ export async function createAuthCoreRuntime(): Promise<AuthCoreRuntime> {
     env.REGISTRATION_TOKEN_TTL_SECONDS,
   );
 
-  cached = { store, storeBackend, otp, otpDriver, tokens, registrationTokens };
+  cached = {
+    store,
+    storeBackend,
+    otp,
+    otpDriver,
+    tokens,
+    registrationTokens,
+    keyProvider,
+    jwks: keyProvider.getPublicJwks(),
+  };
   return cached;
 }

@@ -113,15 +113,34 @@ operation.
   ADR-002. With no password there is nothing to recover; a locked-out user simply
   logs in again via `POST /auth/login` (a fresh LOGIN OTP).
 
-- [ ] ⚠️ T10  AuditEvent writes (`LOGIN_SUCCESS`, `LOGIN_FAILED`,
-  `KYC_DOCUMENT_UPLOADED`, …) — NOT yet implemented. The live schema has
-  `AuditEvent` (not `AuditLog`); manual audit-event emission (DECISION-B) is
-  deferred to the recon/audit plan. Honest ⚠️.
+- [x] ✅ — ✓ verified (2026-06-27 remaining-tasks) T10  AuditEvent writes
+  (DECISION-B, manual emission). Shared best-effort helper `writeAudit` lives in
+  `packages/http/src/audit.ts` (typed to the sealed `AuditEventType` enum; never
+  throws, never logs PII). Wired at the real touchpoints: `KYC_DOCUMENT_UPLOADED`
+  (auth/kyc), `LOGIN_SUCCESS` + `LOGIN_FAILED` (otp/verify LOGIN path),
+  `OBJECTION_SUBMITTED` (submit worker), `MUNICIPALITY_RESPONSE_RECEIVED`
+  (webhook). Live-smoke confirmed rows in `AuditEvent` (LOGIN_SUCCESS with
+  userId; LOGIN_FAILED with masked phone, no userId).
+  - [x] ❌ DESCOPED (sealed data-model) T10  `REGISTERED` / `TOKEN_REFRESHED` /
+    `LOGGED_OUT` event names are **not** members of the sealed `AuditEventType`
+    enum (`docs/data-model/user-auth.md`). Emitting them would require mutating
+    the sealed enum, which is out of scope — only the enum's defined events are
+    wired. Adding those events is a data-model change, not a code change.
 
-- [ ] ⚠️ T11  Production hardening — RS256 keys are dev keys under
-  `backend/keys/` (private key gitignored). Real deployment needs Azure Key Vault
-  key loading + JWKS endpoint, Redis HA, and the rate-limit middleware
-  (conventions §5 AUTH/SYSTEM/WRITE/READ categories) which is NOT yet wired.
+- [x] ✅ — ✓ verified (2026-06-27 remaining-tasks) T11 (split — JWKS + KeyProvider)
+  `KeyProvider` interface in `packages/auth-core/src/key-provider.ts`
+  (`getSigningKey()` / `getPublicJwks()`) with an env/file impl (`EnvKeyProvider`,
+  loads the RS256 dev PEMs) and a marked `AzureKeyVaultKeyProvider` stub (throws
+  "provision a Key Vault"). `GET /.well-known/jwks.json` on auth-service returns a
+  valid JWK set (kid, kty:RSA, use:sig, alg:RS256, n, e); the access-token header
+  now carries the matching `kid`. Token verification unchanged. Live-smoke
+  confirmed the JWK shape + a kid-stamped token still verifies.
+
+- [ ] ⚠️ T11 (remainder — infra, NOT built)  **Azure Key Vault** real key loading
+  (`AzureKeyVaultKeyProvider` is an honest stub — needs a provisioned Key Vault +
+  managed identity with key sign/get) and **Redis HA** are deployment infra, not
+  buildable in this environment. The rate-limit middleware (conventions §5) IS
+  wired (`rateLimit(...)` on the routes). Honest ⚠️ for Key Vault + Redis HA.
 
 ## Recommended skill
 ▶ `/build-to-contract` ✅ — builds the service implementation from the API
@@ -239,3 +258,38 @@ canonical ADR-002 passwordless contract (NOT the stale password tasks above).
 - T1–T9 flipped `⚠️ → ✅ verified`. forgot/reset-password marked `❌ DESCOPED (ADR-002)`.
 - Honest `⚠️` retained: KYC Azure Blob upload is a stub; AuditEvent emission deferred;
   rate-limit middleware + Key Vault/JWKS + Redis HA are production-hardening, not built.
+
+## Execution Note — 2026-06-27 (remaining tasks)
+
+**T10 — AuditEvent emission ✅.** Added `writeAudit({event,userId?,ip?,entityId?,
+entityType?,metadata?})` in `packages/http/src/audit.ts` — best-effort (swallows
+DB errors, never breaks the request), typed to the **sealed** `AuditEventType`
+enum, and PII-free (callers pass `userId` / masked values, never raw phone or
+idNumber). Wired at: `KYC_DOCUMENT_UPLOADED` (`apps/auth` /auth/kyc),
+`LOGIN_SUCCESS` + `LOGIN_FAILED` (`apps/otp` /otp/verify LOGIN path),
+`OBJECTION_SUBMITTED` (`packages/queue` submit worker, after the ref is minted),
+`MUNICIPALITY_RESPONSE_RECEIVED` (`apps/municipality` webhook). `REGISTERED`,
+`TOKEN_REFRESHED`, `LOGGED_OUT` are **DESCOPED** — they are not members of the
+sealed `AuditEventType` enum and adding them is a data-model change, not a code
+change.
+
+**T11 — JWKS + KeyProvider ✅ (buildable half).** `KeyProvider` interface
+(`packages/auth-core/src/key-provider.ts`): `EnvKeyProvider` (loads the RS256 dev
+PEMs already configured) + `AzureKeyVaultKeyProvider` (marked stub, throws). New
+env: `JWT_SIGNING_KEY_ID` (default `easyrates-dev-rs256`) and `JWT_KEY_PROVIDER`
+(`env` | `azure-key-vault`). The access-token header now carries `kid`;
+`GET /.well-known/jwks.json` on auth-service publishes the RS256 public key as a
+JWK set (`kid,kty:RSA,use:sig,alg:RS256,n,e`). Token verification is unchanged.
+
+**T11 — Azure Key Vault + Redis HA ⚠️ (NOT built).** Both need provisioned infra
+(a Key Vault + managed identity; a Redis HA cluster). `AzureKeyVaultKeyProvider`
+is an honest throwing stub left for that work; Redis HA is untouched.
+
+**Tests.** +`packages/auth-core/src/key-provider.test.ts` (JWK shape, EnvKeyProvider
+JWKS, Azure stub throws), tokens.test.ts kid-header assertions,
+`packages/http/src/audit.test.ts` (row written, defaults, best-effort swallow).
+Suite 104 → 128, all green; `tsc --noEmit` exit 0.
+
+**Live smoke.** `GET /.well-known/jwks.json` → valid single-key JWK set. Driven
+login (OTP_MOCK) → `LOGIN_SUCCESS` AuditEvent row (userId, ip only); wrong code →
+`LOGIN_FAILED` row (no userId, masked phone). Services torn down after.

@@ -1,5 +1,7 @@
 import { Queue, Worker, type ConnectionOptions, type Job } from "bullmq";
 import { prisma } from "@easyrates/db";
+import { writeAudit } from "@easyrates/http";
+import { getMunicipalitySubmissionAdapter } from "@easyrates/adapters";
 import { getQueueConnection } from "./connection.js";
 import { enqueueNotification } from "./notification-queue.js";
 
@@ -70,20 +72,6 @@ export async function enqueueObjectionSubmit(
 }
 
 /**
- * Generate the next ELM-2026-NNNNNN reference. NNNNNN is the count of objections
- * carrying a refNumber + 1, zero-padded to 6 digits. Collisions are caught by
- * the @unique constraint and retried by the worker's `attempts`.
- */
-async function nextRefNumber(): Promise<string> {
-  const year = new Date().getUTCFullYear();
-  const count = await prisma.objection.count({
-    where: { refNumber: { not: null } },
-  });
-  const seq = String(count + 1).padStart(6, "0");
-  return `ELM-${year}-${seq}`;
-}
-
-/**
  * Finalise an objection submission. Exported so the worker and unit tests share
  * one path. Idempotent: an objection that already has a refNumber (already
  * submitted) is returned unchanged.
@@ -106,7 +94,12 @@ export async function processObjectionSubmitJob(
     return { objectionId: objection.id, refNumber: objection.refNumber };
   }
 
-  const refNumber = await nextRefNumber();
+  // Submit through the MunicipalitySubmissionAdapter (default stub mints the ELM
+  // ref locally; a real CRM impl swaps in here without touching this worker).
+  const { refNumber } = await getMunicipalitySubmissionAdapter().submit({
+    objectionId: objection.id,
+    userId: objection.userId,
+  });
 
   const result = await prisma.$transaction(async (tx) => {
     const updated = await tx.objection.update({
@@ -134,6 +127,15 @@ export async function processObjectionSubmitJob(
     });
 
     return { objection: updated, notificationId: notification.id };
+  });
+
+  // POPIA audit: the objection was submitted to the municipality (ref minted).
+  await writeAudit({
+    event: "OBJECTION_SUBMITTED",
+    userId: objection.userId,
+    entityId: objection.id,
+    entityType: "Objection",
+    metadata: { refNumber },
   });
 
   // Step 3 (async): fan the confirmation notification out after commit.

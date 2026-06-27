@@ -1,65 +1,20 @@
 import { timingSafeEqual } from "node:crypto";
-import type { ObjectionStatus } from "@easyrates/db";
 
 /**
- * municipality-service business logic — pure state machine + secret comparison.
- * The DB writes, Redis idempotency, and HTTP live in app.ts; the decisions worth
- * testing (which transitions are legal, terminal, or no-ops) live here.
+ * municipality-service business logic — webhook-local concerns (idempotency
+ * replay + shared-secret compare). The objection state machine (which
+ * transitions are legal / terminal / no-op) has moved into the swappable
+ * `@easyrates/adapters` MunicipalityResponseAdapter; it is re-exported here so
+ * the webhook handler and the existing unit tests keep one import surface.
  */
 
-export const OBJECTION_STATUSES: ObjectionStatus[] = [
-  "UNDER_REVIEW",
-  "MORE_INFO_REQUESTED",
-  "UPHELD",
-  "REJECTED",
-];
-
-const TERMINAL: ReadonlySet<ObjectionStatus> = new Set<ObjectionStatus>([
-  "UPHELD",
-  "REJECTED",
-]);
-
-/** Allowed non-terminal transitions (municipality-service.md State transition rules). */
-const ALLOWED: Record<ObjectionStatus, ReadonlySet<ObjectionStatus>> = {
-  UNDER_REVIEW: new Set<ObjectionStatus>([
-    "MORE_INFO_REQUESTED",
-    "UPHELD",
-    "REJECTED",
-  ]),
-  MORE_INFO_REQUESTED: new Set<ObjectionStatus>([
-    "UNDER_REVIEW",
-    "UPHELD",
-    "REJECTED",
-  ]),
-  UPHELD: new Set<ObjectionStatus>(),
-  REJECTED: new Set<ObjectionStatus>(),
-};
-
-export function isTerminal(status: ObjectionStatus): boolean {
-  return TERMINAL.has(status);
-}
-
-export type TransitionDecision =
-  | { kind: "apply" } // legal transition → update Objection.status + notify
-  | { kind: "terminal" } // 409 conflict — current is terminal, would re-open
-  | { kind: "illegal" }; // 422 unprocessable — illegal / no-op transition
-
-/**
- * Classify a requested transition. Every response is still INSERTed for audit
- * upstream — this decides ONLY steps 2 (status update) and 3 (notification).
- *
- *  - current terminal (UPHELD/REJECTED) → `terminal` (409).
- *  - requested ∈ allowed(current)       → `apply`.
- *  - otherwise (no-op or illegal)        → `illegal` (422).
- */
-export function classifyTransition(
-  current: ObjectionStatus,
-  requested: ObjectionStatus,
-): TransitionDecision {
-  if (isTerminal(current)) return { kind: "terminal" };
-  if (ALLOWED[current].has(requested)) return { kind: "apply" };
-  return { kind: "illegal" };
-}
+// State machine — single authority lives in the response adapter.
+export {
+  OBJECTION_STATUSES,
+  isTerminal,
+  classifyTransition,
+} from "@easyrates/adapters";
+export type { TransitionDecision } from "@easyrates/adapters";
 
 /**
  * Idempotency replay decision. Given the stored value for an idempotencyKey

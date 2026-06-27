@@ -27,10 +27,13 @@ import {
   MAX_FILE_SIZE_BYTES,
   UPLOAD_CONFIG,
   decideDraftUpsert,
+  evaluateSufficiency,
+  expectedAmountFromAi,
   toEvidenceResponse,
   toObjectionSummary,
   validateEvidenceFile,
   type ObjectionStatusResponse,
+  type ObjectionSummaryResponse,
 } from "./logic.js";
 
 // ---- Validation (objection-service.md) -------------------------------------
@@ -90,6 +93,18 @@ async function ownedObjectionById(req: AuthedRequest, id: string) {
     where: { id, deletedAt: null },
   });
   if (!objection) throw ApiError.notFound("Objection not found.");
+  if (objection.userId !== req.userId) {
+    throw ApiError.forbidden("Objection not owned by the caller.");
+  }
+  return objection;
+}
+
+/** Load a SUBMITTED objection by refNumber owned by the caller, or throw 404/403. */
+async function ownedObjectionByRef(req: AuthedRequest, ref: string) {
+  const objection = await prisma.objection.findFirst({
+    where: { refNumber: ref, deletedAt: null },
+  });
+  if (!objection) throw ApiError.notFound("No objection with that refNumber.");
   if (objection.userId !== req.userId) {
     throw ApiError.forbidden("Objection not owned by the caller.");
   }
@@ -296,6 +311,104 @@ export function createObjectionApp(rt: AuthCoreRuntime): Express {
     }),
   );
 
+  // ---- GET /objections/:id/sufficiency -------------------------------------
+  // Rule-based evidence-sufficiency check (AI content verification is post-MVP).
+  app.get(
+    "/objections/:id/sufficiency",
+    requireAuth(rt.tokens),
+    rateLimit("READ"),
+    asyncHandler(async (req: AuthedRequest, res) => {
+      const objection = await ownedObjectionById(req, req.params.id!);
+      const evidenceCount = await prisma.evidenceFile.count({
+        where: { objectionId: objection.id, deletedAt: null },
+      });
+      res.status(200).json(
+        ok(
+          evaluateSufficiency({
+            objectionId: objection.id,
+            category: objection.category,
+            evidenceCount,
+          }),
+        ),
+      );
+    }),
+  );
+
+  // ---- GET /objections/:id/summary -----------------------------------------
+  // Review Summary — the pre-submission "check everything is right" view.
+  app.get(
+    "/objections/:id/summary",
+    requireAuth(rt.tokens),
+    rateLimit("READ"),
+    asyncHandler(async (req: AuthedRequest, res) => {
+      const objection = await prisma.objection.findFirst({
+        where: { id: req.params.id!, deletedAt: null },
+        include: {
+          lineItem: {
+            include: {
+              bill: {
+                select: {
+                  accountNumber: true,
+                  period: true,
+                  aiCalculation: {
+                    select: { estimatedAmount: true, confidence: true },
+                  },
+                },
+              },
+            },
+          },
+          evidenceFiles: { where: { deletedAt: null } },
+        },
+      });
+      if (!objection) throw ApiError.notFound("Objection not found.");
+      if (objection.userId !== req.userId) {
+        throw ApiError.forbidden("Objection not owned by the caller.");
+      }
+
+      const property = await prisma.property.findUnique({
+        where: { accountNumber: objection.lineItem.bill.accountNumber },
+        select: { address: true },
+      });
+
+      const expectedAmount = expectedAmountFromAi(
+        objection.lineItem.bill.aiCalculation,
+      );
+      const chargedAmount = objection.lineItem.amount.toFixed(2);
+
+      const payload: ObjectionSummaryResponse = {
+        objectionId: objection.id,
+        property: {
+          accountNumber: objection.lineItem.bill.accountNumber,
+          address: property?.address ?? "",
+        },
+        billingPeriod: objection.lineItem.bill.period,
+        disputedItems: [
+          {
+            lineItemId: objection.lineItem.id,
+            label: objection.lineItem.description,
+            chargedAmount,
+            expectedAmount,
+            category: objection.category,
+          },
+        ],
+        documents: objection.evidenceFiles.map((e) => ({
+          evidenceId: e.id,
+          filename: e.filename,
+          mimeType: e.mimeType,
+        })),
+        // Disputed total = charged − expected (when an estimate clears the floor),
+        // else the full charged amount is in dispute.
+        totalDisputedAmount: expectedAmount
+          ? (
+              Number(chargedAmount) - Number(expectedAmount)
+            ).toFixed(2)
+          : chargedAmount,
+      };
+
+      res.status(200).json(ok(payload));
+    }),
+  );
+
   // ---- POST /objections/:id/submit (async 202) -----------------------------
   app.post(
     "/objections/:id/submit",
@@ -490,6 +603,42 @@ export function createObjectionApp(rt: AuthCoreRuntime): Express {
       };
 
       res.status(200).json(ok(payload));
+    }),
+  );
+
+  // ---- POST /objections/:ref/escalate --------------------------------------
+  // Formal appeal after a REJECTED decision. `escalated` is a CLIENT display
+  // state (not an ObjectionStatus); the refNumber + underlying status are
+  // unchanged. 409 if the objection is not in REJECTED.
+  app.post(
+    "/objections/:ref/escalate",
+    requireAuth(rt.tokens),
+    rateLimit("WRITE"),
+    asyncHandler(async (req: AuthedRequest, res) => {
+      const objection = await ownedObjectionByRef(req, req.params.ref!);
+      if (objection.status !== "REJECTED") {
+        throw ApiError.conflict(
+          "Escalation is only valid after a REJECTED decision.",
+        );
+      }
+      res
+        .status(200)
+        .json(ok({ refNumber: objection.refNumber!, escalated: true as const }));
+    }),
+  );
+
+  // ---- POST /objections/:ref/close -----------------------------------------
+  // Close the case after an UPHELD decision was viewed. `closed` is a CLIENT
+  // display state, not an enum value (the contract lists no 409 here).
+  app.post(
+    "/objections/:ref/close",
+    requireAuth(rt.tokens),
+    rateLimit("WRITE"),
+    asyncHandler(async (req: AuthedRequest, res) => {
+      const objection = await ownedObjectionByRef(req, req.params.ref!);
+      res
+        .status(200)
+        .json(ok({ refNumber: objection.refNumber!, closed: true as const }));
     }),
   );
 

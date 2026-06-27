@@ -35,7 +35,7 @@ TRACKING Figma status branches covered by seed data and integration smoke.
 
 ## Tasks
 
-- [ ] ⚠️ T1  Write the municipality response adapter interface at
+- [x] ✅ T1 — ✓ verified (built as packages/adapters/municipality-response-adapter.ts; owns the state machine, webhook ingests via it; path reconciled)  Write the municipality response adapter interface at
   `easy_rates/backend/shared/adapters/municipality-response-adapter.ts`:
 
   ```ts
@@ -57,12 +57,25 @@ TRACKING Figma status branches covered by seed data and integration smoke.
   Stub implementation returns seed-controlled status responses.
   Done when: interface and stub exist; stub compiles.
 
-  - [x] ❌ DESCOPED (2026-06-27) T1  The status-service is **dissolved** by the
-    canonical plan: status *reads* moved to objection-service (`GET /objections/:ref/status`,
+  - [x] ❌ DESCOPED (2026-06-27) T1 (polling)  The status-service is **dissolved** by
+    the canonical plan: status *reads* moved to objection-service (`GET /objections/:ref/status`,
     built in plan 09), and status *ingestion* is the **municipality-service** CRM
     webhook (built this build). There is no polling `fetchStatus` adapter — the
     municipality pushes resolutions in. The old enum is also wrong (`PENDING` is
     not a value; canonical is UNDER_REVIEW/MORE_INFO_REQUESTED/UPHELD/REJECTED).
+
+  - [x] ✅ — ✓ verified (2026-06-27 remaining-tasks) T1 (adapter)  The **inbound**
+    ingestion now goes through a clean swappable `MunicipalityResponseAdapter`
+    (`packages/adapters/src/municipality-response-adapter.ts`) — the in-PUSH
+    equivalent of the planned `shared/adapters/municipality-response-adapter.ts`
+    (path reconciled to the monorepo package layout; PUSH webhook, not polling).
+    The locked four-value state machine (terminal states + allowed transitions)
+    moved into the adapter as the default `StateMachineMunicipalityResponseAdapter`;
+    the municipality webhook handler calls **through** `getMunicipalityResponseAdapter().
+    classify(...)` and emits `MUNICIPALITY_RESPONSE_RECEIVED` via `writeAudit`. A real
+    CRM with different transition rules swaps in via `setMunicipalityResponseAdapter`.
+    Behaviour unchanged — live smoke advanced UNDER_REVIEW → UPHELD and the
+    terminal-state guard still returned 409 on a re-open attempt.
 
 - [x] ✅ — ✓ verified (2026-06-27) T2  Status read = `GET /objections/:ref/status`
   (built in objection-service, plan 09 — the dissolved status-service folds here).
@@ -189,3 +202,27 @@ This plan predated the canonical contracts and described singular `/status/*` ro
 polling `fetchStatus` adapter, a `PENDING` status, and an `ObjectionStatusHistory` table — all
 superseded. Verified: `pnpm -r exec tsc --noEmit` → 0; 9 unit tests green; live-DB+Redis smoke
 (transcript + psql). Honest ⚠️: the source-IP allowlist and full rate-limit infra are not built.
+
+## Execution Note — 2026-06-27 (remaining tasks)
+
+**T1 — municipality response adapter ✅ (path reconciled).** The inbound CRM webhook
+(municipality-service) now ingests through `MunicipalityResponseAdapter` in the new
+`@easyrates/adapters` package. The locked four-value state machine
+(`isTerminal`/`classifyTransition`/`OBJECTION_STATUSES`) moved out of
+`apps/municipality/src/logic.ts` into the adapter as the default
+`StateMachineMunicipalityResponseAdapter`; logic.ts re-exports it so the existing unit
+tests keep one import surface. The webhook handler calls
+`getMunicipalityResponseAdapter().classify(...)` and emits a
+`MUNICIPALITY_RESPONSE_RECEIVED` AuditEvent (via `writeAudit`) on receipt. The original
+`shared/adapters/municipality-response-adapter.ts` polling `fetchStatus` shape is
+reconciled to the PUSH-webhook reality + the monorepo package layout. Swap via
+`setMunicipalityResponseAdapter`.
+
+**Tests.** `packages/adapters/src/municipality-response-adapter.test.ts` — default-impl
+round-trips the state machine (apply / terminal / illegal), and selection/swap. Existing
+municipality logic.test.ts still green (re-exports). Suite 104 → 128; `tsc --noEmit` 0.
+
+**Live smoke.** Webhook `UNDER_REVIEW → UPHELD` on `ELM-2026-000004` → status advanced,
+`MunicipalityResponse` row written (adjustedAmount 410.00), notification enqueued,
+`MUNICIPALITY_RESPONSE_RECEIVED` audit row present. A second webhook re-opening the
+terminal case → `409 conflict` (terminal guard intact). Services torn down after.

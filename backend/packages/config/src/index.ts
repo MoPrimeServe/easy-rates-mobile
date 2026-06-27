@@ -68,6 +68,13 @@ const envSchema = z.object({
   JWT_PUBLIC_KEY_PEM_PATH: z.string().default("./keys/jwt-rs256-public.pem"),
   JWT_ISSUER: z.string().default("easyrates-auth"),
   JWT_AUDIENCE: z.string().default("easyrates-api"),
+  // Key id stamped into the access-token header (`kid`) and published in the
+  // JWKS so external verifiers can select the right key. In production this is
+  // the Azure Key Vault key name; in dev it is a stable label for the dev PEM.
+  JWT_SIGNING_KEY_ID: z.string().default("easyrates-dev-rs256"),
+  // Which KeyProvider impl to use. "env" = load the RS256 PEMs from env/file
+  // (the only buildable impl). "azure-key-vault" is a marked stub (needs infra).
+  JWT_KEY_PROVIDER: z.enum(["env", "azure-key-vault"]).default("env"),
 
   // OTP lifecycle params (otp-service contract — central resolved values).
   OTP_TTL_SECONDS: z.coerce.number().int().positive().default(600),

@@ -48,7 +48,7 @@ Figma branches; integration smoke passes.
   account: uploaded `__smoketest/<ts>.txt` → downloaded (bytes matched) → DELETED
   (cleanup verified). MinIO emulator remains ❌ DESCOPED (not in any contract).
 
-- [ ] ⚠️ T2  Write the municipality submission adapter interface at
+- [x] ✅ T2 — ✓ verified (built as packages/adapters/municipality-submission-adapter.ts; path reconciled from shared/adapters/)  Write the municipality submission adapter interface at
   `easy_rates/backend/shared/adapters/municipality-submission-adapter.ts`:
 
   ```ts
@@ -65,13 +65,18 @@ Figma branches; integration smoke passes.
   Stub implementation returns a generated ref number and `status: 'ACCEPTED'`.
   Done when: interface exists; stub compiles.
 
-  - [x] ❌ DESCOPED (2026-06-27) T2  The canonical objection-service contract has
-    no synchronous municipality-submission adapter. Submission is **async** (202
-    + statusUrl, §8): `POST /objections/:id/submit` enqueues to the BullMQ
-    `objection-submit` queue (`packages/queue`), whose worker assigns the
-    `ELM-2026-NNNNNN` refNumber and finalises the Objection. The municipality
-    side is the **inbound CRM webhook** (municipality-service, plan 11), not an
-    outbound adapter from objection-service.
+  - [x] ✅ — ✓ verified (2026-06-27 remaining-tasks) T2  Reconciled. The original
+    plan named `shared/adapters/municipality-submission-adapter.ts` with a
+    **synchronous** signature; the canonical contract makes submission **async**
+    (202 + statusUrl, §8). The intent — one swappable interface so the real CRM
+    drops in — is satisfied by `MunicipalitySubmissionAdapter` in
+    `packages/adapters/src/municipality-submission-adapter.ts` (path reconciled:
+    no `shared/` tree in the monorepo). Default `StubMunicipalitySubmissionAdapter.
+    submit()` mints the `ELM-2026-NNNNNN` ref locally (the prior queue-local
+    `nextRefNumber` moved here); the `objection-submit` worker calls **through**
+    the adapter via `getMunicipalitySubmissionAdapter()`. Swap point:
+    `setMunicipalitySubmissionAdapter(realCrmImpl)`. Behaviour unchanged — live
+    smoke minted `ELM-2026-000004`. Unit tests cover adapter selection/round-trip.
 
 - [x] ✅ — ✓ verified (2026-06-27) T3  `POST /objections/draft` (canonical path,
   NOT `POST /objection`). UPSERT — one open draft per user+lineItem; create-or-
@@ -96,13 +101,29 @@ Figma branches; integration smoke passes.
   unit tests (`validateEvidenceFile` size/MIME/count). ✅ Real Azure Blob now wired
   (T1) — `putEvidence` routes through the env-selected `EvidenceStore`.
 
-- [ ] ⚠️ T5  `GET /objections/:id/summary` — Review Summary view. Defined in the
-  canonical contract but **out of this build's scope** (the 5 core routes built
-  were draft / evidence / submit / list / status). Not yet implemented. Adjacent
-  contract routes also deferred: `GET /objections/:id/sufficiency`,
-  `POST /objections/:ref/probe`, `/escalate`, `/close`.
+- [x] ✅ — ✓ verified (2026-06-27 remaining-tasks) T5  Remaining CANONICAL routes
+  built, Prisma-backed, auth-required, canonical envelope/shapes:
+  - `GET /objections/:id/summary` — Review Summary (property, billingPeriod,
+    disputedItems with charged/expected amounts, documents, totalDisputedAmount).
+    Live-smoke returned the canonical shape.
+  - `GET /objections/:id/sufficiency` — rule-based evidence check (doc count per
+    category; AI verification is post-MVP per the contract). Live-smoke returned
+    `{sufficient,missing[]}`.
+  - `POST /objections/:ref/escalate` — display state `escalated:true`; 409 unless
+    the objection is `REJECTED` (verified 409 on an UPHELD case).
+  - `POST /objections/:ref/close` — display state `closed:true` (verified 200).
+  - [x] ❌ DESCOPED (sealed data-model) T5  `POST /objections/:ref/probe` IS in
+    the canonical contract, but its business rule (max 3 probes / objection, one
+    per 24 h, auto-escalate after the 3rd) needs a **persistent probe counter**
+    and the sealed schema has **no** such column. Implementing it correctly
+    requires a data-model change (a probe-count field / table), which is out of
+    scope. Honest descope — not a contract gap, a schema gap.
+  - NOTE the original plan listed `/probe`, `/escalate`, `/close` as "deferred"
+    and the task hypothesised they were non-canonical; verified against
+    `system-design/api/objection-service.md` — all three ARE canonical. escalate/
+    close are stateless (built); probe is descoped for the schema reason above.
 
-- [ ] ⚠️ T6  `POST /objection/:id/submit` — submit objection to municipality:
+- [x] ✅ T6 — ✓ verified (POST /objections/:id/submit calls MunicipalitySubmissionAdapter; ELM-2026-000004 minted in smoke; 409 on already-submitted)  `POST /objection/:id/submit` — submit objection to municipality:
   - Validate objection status is `DRAFT` (reject 409 if already submitted)
   - Call `municipalityAdapter.submitObjection(...)` — stub returns ref number
     - If adapter fails: return 502 immediately; do NOT update Objection status —
@@ -125,6 +146,14 @@ Figma branches; integration smoke passes.
     and the `POST /notify` call (replaced by the BullMQ notification queue).
     Verified via smoke (202 + statusUrl → worker assigned ELM-2026-000002, psql
     confirms refNumber + UNDER_REVIEW + the notification row).
+
+  - [x] ✅ — ✓ verified (2026-06-27 remaining-tasks) T6  Refactored to submit
+    **through** the `MunicipalitySubmissionAdapter` (T2): the worker no longer
+    mints the ref inline — it calls `getMunicipalitySubmissionAdapter().submit()`
+    and emits the `OBJECTION_SUBMITTED` AuditEvent (via `writeAudit`) after the
+    ref is assigned. Behaviour unchanged; live smoke minted `ELM-2026-000004`,
+    status UNDER_REVIEW, submittedAt stamped, and an `OBJECTION_SUBMITTED`
+    AuditEvent row (`{refNumber}`) confirmed in psql.
 
 - [x] ✅ — ✓ verified (2026-06-27) T7  Seed already provides the submitted
   objection `ELM-2026-000001` (UNDER_REVIEW) + a flagged WATER line item, which
@@ -255,3 +284,30 @@ interface in `apps/objection/src/blob-store.ts`:
   (cleanupVerified true). The smoke object was removed; no residue.
 - WRITE/READ/SUBMIT rate-limits wired on the objection routes (draft/evidence →
   WRITE, submit → SUBMIT 5/24h, list/status → READ).
+
+## Execution Note — 2026-06-27 (remaining tasks)
+
+**T2/T6 — municipality submission adapter ✅ (path reconciled).** Introduced
+`@easyrates/adapters` (`packages/adapters`). `MunicipalitySubmissionAdapter` (outbound
+boundary) with default `StubMunicipalitySubmissionAdapter.submit()` minting the
+`ELM-YYYY-NNNNNN` ref (the queue-local `nextRefNumber` moved into the adapter as
+`nextElmRefNumber`). The `objection-submit` worker now calls through
+`getMunicipalitySubmissionAdapter()` and emits `OBJECTION_SUBMITTED` via `writeAudit`.
+Original `shared/adapters/municipality-submission-adapter.ts` path → reconciled to the
+monorepo package layout (no `shared/` tree). Swap via `setMunicipalitySubmissionAdapter`.
+
+**T5 — remaining canonical routes ✅ / probe DESCOPED.** Built `GET /objections/:id/
+summary`, `GET /objections/:id/sufficiency`, `POST /objections/:ref/escalate`,
+`POST /objections/:ref/close` — Prisma-backed, auth-required, canonical envelopes.
+`POST /objections/:ref/probe` is canonical but DESCOPED: its 3-per-objection business
+counter has no column in the sealed schema (a data-model change, out of scope).
+
+**Tests.** New `packages/adapters/src/municipality-submission-adapter.test.ts` +
+`...response-adapter.test.ts` (selection / swap / round-trip); objection logic.test.ts
+extended with `evaluateSufficiency` + `expectedAmountFromAi`. Suite 104 → 128 green;
+`tsc --noEmit` exit 0.
+
+**Live smoke.** draft → evidence (PDF) → submit (202) → worker minted **ELM-2026-000004**
+(UNDER_REVIEW, submittedAt set) + `OBJECTION_SUBMITTED` audit row. summary/sufficiency
+returned canonical shapes with a real token; close → `closed:true`; escalate on an
+UPHELD case → 409. Services torn down after.
