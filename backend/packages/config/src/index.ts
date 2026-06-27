@@ -90,6 +90,10 @@ const envSchema = z.object({
   MUNICIPAL_WEBHOOK_SECRET: z
     .string()
     .min(1, "MUNICIPAL_WEBHOOK_SECRET is required"),
+
+  // Local blob-storage stub directory (objection evidence). Azure Blob Storage
+  // is the production target — this is the dev stub. Gitignored.
+  BLOB_DIR: z.string().min(1).default("./blob-store"),
 });
 
 export type Env = z.infer<typeof envSchema>;

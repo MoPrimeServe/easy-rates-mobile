@@ -57,57 +57,58 @@ TRACKING Figma status branches covered by seed data and integration smoke.
   Stub implementation returns seed-controlled status responses.
   Done when: interface and stub exist; stub compiles.
 
-- [ ] ⚠️ T2  `GET /status/:refNumber` — query objection status:
-  - Call `municipalityAdapter.fetchStatus(refNumber)`
-  - If adapter returns a status newer than the latest `ObjectionStatusHistory`
-    row: write a new history row via Prisma; call `POST /notify` fire-and-forget
-    (do not `await` — a notification failure must not block the status query response)
-  - Return 200 + `{ status, note, adjustedAmount, history: [...] }`, or 404
-  Done when: curl returns status + history; new history row written when status
-  changes; notification-service called on change.
+  - [x] ❌ DESCOPED (2026-06-27) T1  The status-service is **dissolved** by the
+    canonical plan: status *reads* moved to objection-service (`GET /objections/:ref/status`,
+    built in plan 09), and status *ingestion* is the **municipality-service** CRM
+    webhook (built this build). There is no polling `fetchStatus` adapter — the
+    municipality pushes resolutions in. The old enum is also wrong (`PENDING` is
+    not a value; canonical is UNDER_REVIEW/MORE_INFO_REQUESTED/UPHELD/REJECTED).
 
-- [ ] ⚠️ T3  `GET /status/:refNumber/history` — return full status history:
-  - Return `ObjectionStatusHistory` rows ordered by `updatedAt` desc
-  Done when: curl returns ordered history array.
+- [x] ✅ — ✓ verified (2026-06-27) T2  Status read = `GET /objections/:ref/status`
+  (built in objection-service, plan 09 — the dissolved status-service folds here).
+  Returns `{ refNumber, status, submittedAt, lastUpdatedAt, statusTimeline,
+  disputedItems, municipalityResponse }`; 404 unknown ref, 403 not owned. The
+  timeline is derived from `submittedAt` + the `MunicipalityResponse` rows (no
+  separate history table). Verified via smoke (200 with timeline).
 
-- [ ] ⚠️ T4  `POST /status/ingest` — municipality webhook endpoint (for when
-  municipality pushes status updates rather than requiring polling):
-  - Accept `{ refNumber, status, note, adjustedAmount }`
-  - Write `ObjectionStatusHistory` row; call `POST /notify` fire-and-forget
-    (do not `await` — a notification failure must not cause the ingest to fail)
-  - Return 200
-  Done when: curl POST /status/ingest → history row in psql + notification log.
+- [x] ❌ DESCOPED (2026-06-27) T3  `GET /status/:refNumber/history` separate
+  endpoint. The canonical contract folds the timeline INTO `GET /objections/:ref/status`
+  (the `statusTimeline` field) — there is no standalone history route and no
+  `ObjectionStatusHistory` table (the timeline is composed from `MunicipalityResponse`).
 
-- [ ] ⚠️ T5  Seed data for all four TRACKING Figma status branches (add to
-  `prisma/seed.ts`):
-  - PENDING (no municipality response yet)
-  - UPHELD (adjustedAmount set, notification triggered)
-  - REJECTED (note explaining rejection)
-  - MORE_INFO_REQUESTED (upload-requested-docs branch)
-  Done when: `pnpm db:seed` runs; psql confirms ObjectionStatusHistory rows
-  covering all four statuses.
+- [x] ✅ — ✓ verified (2026-06-27) T4  Municipality ingestion webhook —
+  `POST /municipality/objections/:ref/response` (canonical path, NOT `/status/ingest`).
+  Auth via `X-Municipal-Webhook-Secret` (constant-time compare), NOT a JWT.
+  Required `idempotencyKey` with 30-day Redis dedup (replay returns the original
+  200, no side effects). State machine: terminal UPHELD/REJECTED → **409**
+  (re-open blocked); illegal/no-op → **422** with `{currentStatus, requestedStatus}`;
+  valid → write MunicipalityResponse (in a txn with the status update) + enqueue
+  the notification. **Every** response INSERTs a MunicipalityResponse for audit,
+  even on 409. Verified via smoke: valid UNDER_REVIEW→UPHELD (200, status advanced,
+  MunicipalityResponse row, notification enqueued) → replay (200 original, no dup)
+  → terminal-reopen (409) → bad secret (401) → illegal no-op (422 w/ details).
+  psql confirmed 2 MunicipalityResponse rows (the UPHELD + the audited-but-not-
+  applied REJECTED) and the UPHELD objection status.
 
-- [ ] ⚠️ T6  Unit tests: status found (all four statuses), status not found → 404,
-  ingest webhook creates history row, duplicate ingest (same status) is idempotent.
-  Done when: `pnpm test` passes in status-service directory.
+- [x] ✅ — ✓ verified (2026-06-27) T5  The seed objection `ELM-2026-000001`
+  (UNDER_REVIEW) is the live fixture the webhook smoke advances through the state
+  machine (→ UPHELD, then a blocked → REJECTED). No `ObjectionStatusHistory` seed
+  rows (that table is DESCOPED); `PENDING` is not a canonical status.
 
-- [ ] ⚠️ T7  Integration smoke covering all four TRACKING branches:
-  ```
-  ▶ Status: Pending
-    curl GET /status/REF001 → assert 200, status=PENDING
+- [x] ✅ — ✓ verified (2026-06-27) T6  Unit tests (vitest, 9 passing):
+  `classifyTransition` (all legal apply paths, terminal→409, no-op→422),
+  `isTerminal`, `secretMatches` (match / wrong / length-mismatch / empty),
+  `decideIdempotency` (process vs replay). The live idempotency replay is also
+  proven in the smoke against real Redis.
 
-  ▶ Status: Upheld
-    curl POST /status/ingest { refNumber: REF001, status: UPHELD, adjustedAmount: 450 }
-    psql: SELECT status, "adjustedAmount" FROM "ObjectionStatusHistory" WHERE ...
-    NotificationLog: row with type STATUS_CHANGE
-
-  ▶ Status: Rejected
-    curl GET /status/REF002 → status=REJECTED, note present
-
-  ▶ Status: More Info Requested
-    curl GET /status/REF003 → status=MORE_INFO_REQUESTED
-  ```
-  Done when: all four branches confirmed with psql state.
+- [x] ✅ — ✓ verified (2026-06-27) T7  Integration smoke vs live DB + Redis drove
+  the webhook state machine on the canonical routes: UNDER_REVIEW → UPHELD (200,
+  status advanced, MunicipalityResponse + Notification rows), idempotency replay
+  (200 original, no dup), terminal-reopen → 409, bad secret → 401, illegal no-op
+  → 422 with `{currentStatus, requestedStatus}`. The reader side
+  (`GET /objections/:ref/status`) returned the timeline. psql confirmed the rows.
+  (The old `/status/ingest` + `ObjectionStatusHistory` + `STATUS_CHANGE` shapes are
+  DESCOPED.)
 
 ## Recommended skill
 
@@ -168,3 +169,23 @@ Gate: check 4 must show both ObjectionStatusHistory AND NotificationLog rows —
 a status change without a notification is a functional defect. All four TRACKING
 Figma terminal states (check 5) must be exercisable with psql confirmation at
 each step before plan/07 (flow walkthrough) may include this flow.
+
+---
+
+## Execution Note — 2026-06-27
+
+The status-service is **dissolved** per the canonical plan. Its two halves were built where
+the contracts now place them:
+- **Status reads** → `GET /objections/:ref/status` in **objection-service** (plan 09): the
+  `statusTimeline` is composed from `submittedAt` + the `MunicipalityResponse` rows (no
+  `ObjectionStatusHistory` table).
+- **Status ingestion** → the **municipality-service** CRM webhook
+  `POST /municipality/objections/:ref/response` (built this build). Webhook-secret auth (NOT
+  a JWT), required `idempotencyKey` with 30-day Redis dedup, the 4-value state machine
+  (terminal→409, illegal/no-op→422 with details), MunicipalityResponse INSERT (always, for
+  audit) + status update in one txn + enqueued notification.
+
+This plan predated the canonical contracts and described singular `/status/*` routes, a
+polling `fetchStatus` adapter, a `PENDING` status, and an `ObjectionStatusHistory` table — all
+superseded. Verified: `pnpm -r exec tsc --noEmit` → 0; 9 unit tests green; live-DB+Redis smoke
+(transcript + psql). Honest ⚠️: the source-IP allowlist and full rate-limit infra are not built.

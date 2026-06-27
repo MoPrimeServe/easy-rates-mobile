@@ -37,47 +37,57 @@ and status change events.
 
 ## Tasks
 
-- [ ] ⚠️ T1  Add `NOTIFICATION_MOCK`, `FCM_SERVER_KEY` (or APNs creds from ADR),
-  `TWILIO_NOTIFY_SERVICE_SID` to `shared/env.ts` Zod schema and `.env.example`.
-  Done when: missing vars cause startup to fail with a clear message.
+- [x] ⚠️ T1  Env. `REDIS_URL` (BullMQ broker) is already in `packages/config`;
+  `BLOB_DIR` and the webhook secret were added this build. ⚠️ Real `FCM_SERVER_KEY`
+  / APNs / `TWILIO_NOTIFY_SERVICE_SID` remain TODO — dispatch is a **mock push**
+  (structured log) in the BullMQ notification worker; `NOTIFICATION_MOCK` as a
+  separate flag was not needed (the mock is the only adapter for MVP).
 
-- [ ] ⚠️ T2  `POST /notify` (internal, not exposed to Flutter directly):
-  - Accept `{ userId, type, channel, payload }` where:
-    - `type`: `SUBMISSION_CONFIRMATION | STATUS_CHANGE | GENERAL`
-    - `channel`: `SMS | PUSH | BOTH`
-    - `payload`: `{ title, body, refNumber? }`
-  - If `NOTIFICATION_MOCK=true`: log only, skip real dispatch
-  - If SMS: call Twilio Notify or Programmable Messaging (from ADR)
-  - If PUSH: call FCM/APNs with device token from User record
-  - Write `NotificationLog` via Prisma: userId, type, channel, status
-    (`SENT | FAILED | MOCKED`), sentAt
-  - Return 202 on dispatch; 500 with reason on failure
-  Done when: curl POST /notify → NotificationLog row in psql with correct status.
+- [x] ❌ DESCOPED (2026-06-27) T2  `POST /notify` HTTP route. The canonical
+  notification-service contract has **no inbound `/notify` route** — outbound
+  dispatch is event-driven via BullMQ, and the persisted `Notification` row is the
+  source of truth. Implemented instead: the `notification` queue + worker in
+  `packages/queue` (`enqueueNotification` / `processNotificationJob`), which
+  mock-sends the push and flips `Notification.status → SENT`. The Flutter-facing
+  routes are the 4 below. `SUBMISSION_CONFIRMATION`/`MOCKED` etc. are not in the
+  canonical enums (`NotificationType` / `NotificationStatus`).
 
-- [ ] ⚠️ T3  Wire objection-service to call `POST /notify` after successful
-  submission: `{ type: "SUBMISSION_CONFIRMATION", channel: "SMS", payload: { title: "Objection Received", body: "Ref: {refNumber}" } }`
-  Done when: submitting an objection (plan/09 T6) triggers a NotificationLog
-  row with type `SUBMISSION_CONFIRMATION`.
+- [x] ✅ — ✓ verified (2026-06-27) T2b  `GET /notifications` (paginated inbox,
+  `unreadOnly` filter); `POST /notifications/:id/read` (idempotent, 403/404 guards);
+  `POST /notifications/read-all` → `{ updatedCount }`; `POST /notifications/device-token`
+  → writes `User.deviceToken`. All auth-required, Prisma-backed, server-composed
+  title/preview per type. Verified via smoke (unreadOnly list of 4, read-all
+  updatedCount=4, device-token registered) + unit tests (`inboxWhere`, `countUnread`,
+  `isRead`, `toInboxItem`).
 
-- [ ] ⚠️ T4  `GET /notify/log?userId=<id>` — return notification history for
-  a user, ordered by sentAt desc. Return 200 + array.
-  Done when: curl returns log entries after T3 is exercised.
+- [x] ✅ — ✓ verified (2026-06-27) T3  Objection submission triggers a
+  notification — but via the **BullMQ queue**, not `POST /notify`. The
+  `objection-submit` worker persists an `OBJECTION_RECEIVED` Notification row and
+  enqueues it; the municipality webhook persists `OBJECTION_STATUS` /
+  `MORE_INFO_REQUESTED`. Verified via smoke: submitting ELM-2026-000002 produced
+  the OBJECTION_RECEIVED row (psql); the webhook produced OBJECTION_STATUS — both
+  dispatched to SENT.
 
-- [ ] ⚠️ T5  Seed data for notification Figma branches (add to `prisma/seed.ts`):
-  - Sent notification (status SENT)
-  - Failed notification (status FAILED)
-  - Mocked notification (status MOCKED)
-  Done when: `pnpm db:seed` runs; psql confirms NotificationLog rows.
+- [x] ✅ — ✓ verified (2026-06-27) T4  Notification history is `GET /notifications`
+  (canonical), NOT `GET /notify/log?userId=` — it is auth-scoped to the caller
+  (never a query-param userId), paginated, newest-first, with the `unreadOnly`
+  filter. Verified via smoke. (The `/notify/log` shape is DESCOPED.)
 
-- [ ] ⚠️ T6  Unit tests with `NOTIFICATION_MOCK=true`: dispatch SMS (mocked),
-  dispatch PUSH (mocked), dispatch BOTH, delivery log written, unknown userId → 404.
-  Done when: `pnpm test` passes in notification-service directory.
+- [x] ✅ — ✓ verified (2026-06-27) T5  The seed already provides an
+  `OBJECTION_RECEIVED` notification; the smoke generates more live
+  (OBJECTION_RECEIVED + OBJECTION_STATUS). No `MOCKED`/`FAILED` seed rows needed —
+  those statuses are not canonical (`NotificationStatus` = SENT/DELIVERED/FAILED/
+  PENDING; the worker uses PENDING → SENT).
 
-- [ ] ⚠️ T7  Integration smoke:
-  1. Submit objection (plan/09) → POST /notify called → NotificationLog MOCKED row
-  2. GET /notify/log?userId=... → row visible
-  Done when: NotificationLog row with type `SUBMISSION_CONFIRMATION` confirmed
-  in psql after an objection submission.
+- [x] ✅ — ✓ verified (2026-06-27) T6  Unit tests (vitest, 11 passing): `inboxWhere`
+  unreadOnly filter, `countUnread` read-all updatedCount semantics, `isRead`
+  derivation, `toInboxItem` title/preview/objectionRef. (SMS/PUSH/BOTH + 404
+  cases DESCOPED — no `/notify` route.)
+
+- [x] ✅ — ✓ verified (2026-06-27) T7  Integration smoke vs live DB + Redis:
+  submission and webhook persisted Notification rows; `GET /notifications?unreadOnly=true`
+  returned 4 unread; `read-all` flipped them (updatedCount=4); `device-token`
+  registered. psql confirmed the rows + their SENT status + readAt set after read-all.
 
 ## Recommended skill
 
@@ -124,3 +134,21 @@ Gate: check 3 must produce a psql row before T3 starts. Check 5 must be
 triggered by the objection submission flow — not a direct POST /notify call.
 The integration between objection-service and notification-service must be
 exercised end-to-end.
+
+---
+
+## Execution Note — 2026-06-27
+
+Built the notification-service to the **canonical** `system-design/api/notification-service.md`
+contract. The plan above predated it and described an internal `POST /notify` route, a
+`NotificationLog` table, and `MOCKED`/`SUBMISSION_CONFIRMATION` enum values — all superseded.
+
+Canonical model: **the persisted `Notification` row is the source of truth**; PUSH/SMS/EMAIL
+are async wake-hints. Implemented the 4 Flutter-facing routes (`GET /notifications` with
+`unreadOnly`, `POST /:id/read`, `POST /read-all` → `updatedCount`, `POST /device-token`),
+plus the BullMQ `notification` queue + worker (`packages/queue`) that mock-sends push and
+flips `status → SENT`. Resolved data-model gap #2 — the `readAt` column already exists in the
+migrated schema, so `read = (readAt != null)` is derived directly.
+
+Verified: `pnpm -r exec tsc --noEmit` → 0; 11 unit tests green; live-DB+Redis smoke
+(transcript + psql). Honest ⚠️: real FCM/APNs/Twilio adapters and the full rate-limit infra.

@@ -36,11 +36,12 @@ Figma branches; integration smoke passes.
 
 ## Tasks
 
-- [ ] ⚠️ T1  Add MinIO service to `podman-compose.yml` as blob storage emulator:
-  - Image: `minio/minio`
-  - Named volume, health check
-  - Env vars: `BLOB_ENDPOINT`, `BLOB_ACCESS_KEY`, `BLOB_SECRET_KEY`, `BLOB_BUCKET`
-  Done when: `podman-compose up minio` starts; MinIO console accessible.
+- [x] ❌ DESCOPED (2026-06-27) T1  MinIO emulator. The canonical contract targets
+  **Azure Blob Storage**, not S3/MinIO. For local dev evidence is stored via a
+  filesystem **blob-store stub** (`apps/objection/src/blob-store.ts`, dir from
+  `BLOB_DIR`, gitignored) recording the key on `EvidenceFile.storageKey`. A real
+  Azure Blob adapter remains ⚠️ TODO (swap one file). MinIO/`BLOB_ACCESS_KEY`
+  etc. are not in any contract.
 
 - [ ] ⚠️ T2  Write the municipality submission adapter interface at
   `easy_rates/backend/shared/adapters/municipality-submission-adapter.ts`:
@@ -59,23 +60,41 @@ Figma branches; integration smoke passes.
   Stub implementation returns a generated ref number and `status: 'ACCEPTED'`.
   Done when: interface exists; stub compiles.
 
-- [ ] ⚠️ T3  `POST /objection` — create an objection draft:
-  - Accept `{ userId, accountNumber, lineItemId, category, notes }`
-  - Create `Objection` record via Prisma with status `DRAFT`
-  - Return 201 + `{ objectionId }`
-  Done when: curl creates Objection row in psql.
+  - [x] ❌ DESCOPED (2026-06-27) T2  The canonical objection-service contract has
+    no synchronous municipality-submission adapter. Submission is **async** (202
+    + statusUrl, §8): `POST /objections/:id/submit` enqueues to the BullMQ
+    `objection-submit` queue (`packages/queue`), whose worker assigns the
+    `ELM-2026-NNNNNN` refNumber and finalises the Objection. The municipality
+    side is the **inbound CRM webhook** (municipality-service, plan 11), not an
+    outbound adapter from objection-service.
 
-- [ ] ⚠️ T4  `POST /objection/:id/document` — upload supporting document:
-  - Accept multipart form-data with file field
-  - Validate file type (PDF, JPG, PNG only) and size (max from env)
-  - Upload to blob storage; store key in `Document` record via Prisma
-  - Return 201 + `{ documentId, storageKey }`
-  Done when: uploaded file appears in MinIO; Document row in psql with storageKey.
+- [x] ✅ — ✓ verified (2026-06-27) T3  `POST /objections/draft` (canonical path,
+  NOT `POST /objection`). UPSERT — one open draft per user+lineItem; create-or-
+  overwrite in place; **200** either way (no 409 for an existing draft); 409 only
+  when a *submitted* objection already covers the charge. Returns
+  `{ objectionId, status:"DRAFT", uploadConfig }`. The durable Objection anchor is
+  created here (refNumber/submittedAt null = pre-submission) so evidence can FK to
+  it; editable form state co-stored in `ObjectionDraft`. `DRAFT` is a display
+  marker, not an `ObjectionStatus` value. Verified via smoke (200 create + 200
+  re-save same objectionId + 409 on submitted-charge) and unit tests
+  (`decideDraftUpsert`).
 
-- [ ] ⚠️ T5  `GET /objection/:id/summary` — return objection summary for review:
-  - Return Objection + linked Documents + line item detail from bill-service
-  - Return 200 + full summary, or 404
-  Done when: curl returns objection with document list and line item.
+- [x] ✅ — ✓ verified (2026-06-27) T4  `POST /objections/:id/evidence` (canonical
+  path, NOT `/document`). `multipart/form-data` via multer (memory). **Magic-byte**
+  MIME detection (`file-type`) — declared Content-Type NOT trusted (Rule C).
+  Validates size (10 MiB → 413), MIME allowlist (pdf/jpeg/png → 422
+  `invalid_file_type` with `{detectedType, allowedTypes}`), count (≤5 → 422),
+  missing file → 400 `file_missing`. Stores to the local blob-store stub, records
+  `EvidenceFile.storageKey`, returns the **detected** mimeType. 201 Created.
+  MORE_INFO_REQUESTED upload auto-transitions back to UNDER_REVIEW. Verified:
+  smoke (200 valid PDF written to disk + 422 on a zip masquerading as pdf) +
+  unit tests (`validateEvidenceFile` size/MIME/count). ⚠️ Real Azure Blob TODO.
+
+- [ ] ⚠️ T5  `GET /objections/:id/summary` — Review Summary view. Defined in the
+  canonical contract but **out of this build's scope** (the 5 core routes built
+  were draft / evidence / submit / list / status). Not yet implemented. Adjacent
+  contract routes also deferred: `GET /objections/:id/sufficiency`,
+  `POST /objections/:ref/probe`, `/escalate`, `/close`.
 
 - [ ] ⚠️ T6  `POST /objection/:id/submit` — submit objection to municipality:
   - Validate objection status is `DRAFT` (reject 409 if already submitted)
@@ -90,19 +109,35 @@ Figma branches; integration smoke passes.
   - Return 200 + `{ referenceNumber }` on success
   Done when: curl submit → psql shows SUBMITTED status + refNumber; AuditLog row present.
 
-- [ ] ⚠️ T7  Seed data for SUBMISSION Figma branches (add to `prisma/seed.ts`):
-  - Draft objection (status DRAFT, no refNumber)
-  - Submitted objection (status SUBMITTED, refNumber present)
-  - Failed submission (status DRAFT — simulated adapter failure)
-  Done when: `pnpm db:seed` runs; psql confirms Objection rows with varied status.
+  - [x] ✅ — ✓ verified (2026-06-27) T6  `POST /objections/:id/submit` rebuilt to
+    the canonical **async** contract: **202 Accepted** + `{ jobId, statusUrl }`
+    (§8), NOT a synchronous 200. Enqueues to the BullMQ `objection-submit` queue;
+    the worker assigns `ELM-2026-NNNNNN`, stamps `submittedAt`, consumes the draft,
+    and enqueues an OBJECTION_RECEIVED notification. 409 if already submitted; 422
+    if no evidence attached. ❌ DESCOPED from the old task: the `SUBMITTED` enum
+    value (born UNDER_REVIEW), the synchronous adapter + 502, the AuditLog write,
+    and the `POST /notify` call (replaced by the BullMQ notification queue).
+    Verified via smoke (202 + statusUrl → worker assigned ELM-2026-000002, psql
+    confirms refNumber + UNDER_REVIEW + the notification row).
 
-- [ ] ⚠️ T8  Unit tests: create objection, upload valid doc, upload invalid type → 400,
-  submit (success), submit (already submitted → 409), submit (adapter failure → 502).
-  Done when: `pnpm test` passes in objection-service directory.
+- [x] ✅ — ✓ verified (2026-06-27) T7  Seed already provides the submitted
+  objection `ELM-2026-000001` (UNDER_REVIEW) + a flagged WATER line item, which
+  the smoke drives end-to-end. No new seed rows were required (`DRAFT`/`SUBMITTED`
+  enum values do not exist — DESCOPED). The smoke itself exercises create-draft →
+  evidence → submit → status transitions live.
 
-- [ ] ⚠️ T9  Integration smoke: create objection → upload doc (MinIO check) →
-  GET summary → submit → psql confirms SUBMITTED + refNumber → AuditLog row.
-  Done when: full lifecycle passes with DB and blob storage state confirmed.
+- [x] ✅ — ✓ verified (2026-06-27) T8  Unit tests (vitest, 15 passing):
+  `decideDraftUpsert` (create / overwrite / 409-on-submitted), `validateEvidenceFile`
+  (valid pdf/jpg/png, missing, too-large, invalid-type with detectedType, unknown
+  magic bytes, too-many, count-precedence), uploadConfig-mirrors-contract,
+  `objectionTitle`. (Old "adapter failure → 502" case DESCOPED — no adapter.)
+
+- [x] ✅ — ✓ verified (2026-06-27) T9  Integration smoke vs **live DB + Redis**:
+  draft (200) → re-save UPSERT (200, same id) → submitted-charge (409) → evidence
+  valid PDF (201, file on disk) → zip-as-pdf (422 invalid_file_type) → submit
+  (202 + statusUrl) → worker assigns ELM-2026-NNNNNN → GET /objections (paginated)
+  → GET /objections/:ref/status. psql confirmed the EvidenceFile.storageKey row +
+  blob on disk + the submitted Objection. (MinIO check + AuditLog DESCOPED.)
 
 ## Recommended skill
 
@@ -163,3 +198,29 @@ grep -r "municipality-submission-adapter" \
 
 Gate: check 4 requires both MinIO file AND psql Document row — one without
 the other fails. Check 5 requires AuditLog row, not just HTTP 200.
+
+---
+
+## Execution Note — 2026-06-27
+
+Built the objection-service to the **canonical** `system-design/api/objection-service.md`
+contract (the plan above predated it and described singular `/objection` routes, a MinIO
+emulator, a synchronous municipality adapter, `DRAFT`/`SUBMITTED` enum values, and `POST
+/notify` — all superseded). Implemented the 5 core routes:
+`POST /objections/draft` (UPSERT), `POST /objections/:id/evidence` (multipart + magic-byte
+validation), `POST /objections/:id/submit` (202 async + BullMQ), `GET /objections`
+(paginated + status filter), `GET /objections/:ref/status`.
+
+Key reconciliations:
+- **Evidence FK.** `EvidenceFile.objectionId` is a NON-NULL FK to `Objection`, so evidence
+  cannot attach to a bare `ObjectionDraft`. The durable `Objection` anchor is therefore
+  created at draft-upsert time (refNumber/submittedAt null = pre-submission marker); the
+  editable form lives in `ObjectionDraft`. `:id` in the routes is the `Objection.id`.
+- **Blob storage.** Local filesystem stub (`BLOB_DIR`, gitignored) records the storageKey.
+  Azure Blob is the prod target and remains ⚠️ TODO (single-file adapter swap).
+- **Async submit.** 202 + statusUrl per conventions §8; finalisation (refNumber, notify)
+  runs on the BullMQ `objection-submit` worker (`packages/queue`).
+
+Verified: `pnpm -r exec tsc --noEmit` → 0; 15 unit tests green; full live-DB+Redis smoke
+(transcript + psql row checks). Deferred (honest ⚠️): `GET /:id/summary`, `/:id/sufficiency`,
+`/:ref/probe`, `/escalate`, `/close`, real Azure Blob, and the full rate-limit infra.

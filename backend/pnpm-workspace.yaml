@@ -1,8 +1,13 @@
 packages:
   - "packages/*"
   - "apps/*"
+allowBuilds:
+  # Optional native accelerator for bullmq's msgpackr serializer; building it
+  # clears the ignored-build gate that otherwise fails `pnpm install`.
+  msgpackr-extract: true
 onlyBuiltDependencies:
   - "@prisma/client"
   - "@prisma/engines"
   - esbuild
   - prisma
+  - msgpackr-extract
