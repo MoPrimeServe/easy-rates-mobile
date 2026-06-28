@@ -1,0 +1,672 @@
+{
+  "info": {
+    "_postman_id": "e2e1a7c0-4d2b-4f5e-9c11-easyrates00001",
+    "name": "EasyRates — Mobile Customer Journey",
+    "description": "Ready-to-import walkthrough of the FULL EasyRates mobile customer journey against the live gateway (single origin http://localhost:8080/api/v1).\n\nFolders mirror the seven Figma stages: Onboarding, Find Property, Bill Review, Evidence & Challenge, Submission, Tracking & Resolution, Account & Settings.\n\nHOW TO RUN\n1. Boot the stack in mock mode: `pnpm dev:mock` (OTP_MOCK=true → OTP responses carry `mockCode`, the dev-only plaintext OTP; no real SMS).\n2. Make sure Postgres (easyrates_dev, seeded) + Redis are up.\n3. Fill the collection variable `municipalSecret` with the value of MUNICIPAL_WEBHOOK_SECRET from the gitignored backend/.env (Tracking & Resolution → Municipality Webhook needs it).\n4. Run the whole collection top-to-bottom with the Collection Runner (or send requests in order). Each run uses a fresh timestamp-suffixed phone, so it is re-runnable.\n\nOTP CHAINING (mock). register/start and login dispatch the OTP server-to-server and do NOT echo the code. The public POST /otp/resend returns `mockCode` in mock mode — so the Verify steps' pre-request scripts call /otp/resend (retrying past the 30s resend cooldown) to obtain the plaintext code, then Verify chains it. This is exactly the dev tester's path.\n\nAUTH. Bearer {{accessToken}} is set at the COLLECTION level; the seeded-login Verify step captures it. Public auth/otp routes override with no-auth.\n\nDELIBERATELY OUT OF SCOPE (not in this collection or the backend): Forgot-Password / password reset (auth is passwordless OTP-only, ADR-002 — there is no password to recover), WhatsApp onboarding, and payments.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{accessToken}}", "type": "string" }]
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Mint a fresh, re-runnable SA E.164 phone for the new registrant once per run.",
+          "if (!pm.collectionVariables.get('regPhone') || pm.info.requestName === 'Register — Start') {",
+          "  const suffix = String(Date.now()).slice(-8);",
+          "  pm.collectionVariables.set('regPhone', '+277' + suffix);",
+          "}"
+        ]
+      }
+    }
+  ],
+  "variable": [
+    { "key": "base", "value": "http://localhost:8080/api/v1" },
+    { "key": "accessToken", "value": "" },
+    { "key": "refreshToken", "value": "" },
+    { "key": "registrationToken", "value": "" },
+    { "key": "objectionId", "value": "" },
+    { "key": "objectionRef", "value": "" },
+    { "key": "billId", "value": "" },
+    { "key": "propertyId", "value": "" },
+    { "key": "lineItemId", "value": "" },
+    { "key": "lineItemIds", "value": "[]" },
+    { "key": "notificationId", "value": "" },
+    { "key": "municipalSecret", "value": "" },
+    { "key": "regPhone", "value": "" },
+    { "key": "loginPhone", "value": "+27821234567" },
+    { "key": "seedAccount", "value": "10045821" },
+    { "key": "regIdNumber", "value": "8507158001087" }
+  ],
+  "item": [
+    {
+      "name": "1. Onboarding",
+      "description": "Register a brand-new user end to end (OTP-first, ADR-002), submit KYC, then log in as the SEEDED ratepayer (the user who owns the seeded property/bill/line-items the later stages need).",
+      "item": [
+        {
+          "name": "Register — Start",
+          "event": [
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [
+              "pm.test('register/start → 202', () => pm.response.to.have.status(202));",
+              "const d = pm.response.json().data;",
+              "pm.test('returns ttlSeconds + maskedPhone', () => { pm.expect(d.ttlSeconds).to.eql(600); pm.expect(d.maskedPhone).to.be.a('string'); });"
+            ] } }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"phone\": \"{{regPhone}}\"\n}" },
+            "url": { "raw": "{{base}}/auth/register/start", "host": ["{{base}}"], "path": ["auth", "register", "start"] },
+            "description": "Begins OTP-first registration; dispatches a REGISTRATION OTP server-to-server. Creates no User. 409 if the phone is already registered."
+          }
+        },
+        {
+          "name": "Verify Phone OTP (REGISTRATION)",
+          "event": [
+            { "listen": "prerequest", "script": { "type": "text/javascript", "exec": [
+              "// Obtain the dev mockCode for this phone. register/start does NOT echo the code,",
+              "// so we call the public /otp/resend (which returns mockCode in mock mode),",
+              "// retrying past the 30s resend cooldown. Stores it as {{otpCode}}.",
+              "const base = pm.collectionVariables.get('base');",
+              "const phone = pm.collectionVariables.get('regPhone');",
+              "function attempt(triesLeft) {",
+              "  pm.sendRequest({",
+              "    url: base + '/otp/resend',",
+              "    method: 'POST',",
+              "    header: { 'Content-Type': 'application/json' },",
+              "    body: { mode: 'raw', raw: JSON.stringify({ phone: phone, purpose: 'REGISTRATION' }) }",
+              "  }, function (err, res) {",
+              "    if (err) { return; }",
+              "    const j = res.json();",
+              "    if (j.data && j.data.mockCode) { pm.collectionVariables.set('otpCode', j.data.mockCode); return; }",
+              "    const wait = (j.error && j.error.details && j.error.details.retryAfterSeconds) || 0;",
+              "    if (triesLeft > 0 && wait > 0) { setTimeout(() => attempt(triesLeft - 1), (wait + 1) * 1000); }",
+              "  });",
+              "}",
+              "attempt(2);"
+            ] } },
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [
+              "pm.test('otp/verify (REGISTRATION) → 200', () => pm.response.to.have.status(200));",
+              "const d = pm.response.json().data;",
+              "pm.test('returns registrationToken', () => pm.expect(d.registrationToken).to.be.a('string'));",
+              "pm.collectionVariables.set('registrationToken', d.registrationToken);"
+            ] } }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"phone\": \"{{regPhone}}\",\n  \"code\": \"{{otpCode}}\"\n}" },
+            "url": { "raw": "{{base}}/otp/verify", "host": ["{{base}}"], "path": ["otp", "verify"] },
+            "description": "Verifies the REGISTRATION OTP and returns a single-use registrationToken (no session yet — the User does not exist until Register completes)."
+          }
+        },
+        {
+          "name": "Register",
+          "event": [
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [
+              "pm.test('register → 201', () => pm.response.to.have.status(201));",
+              "const d = pm.response.json().data;",
+              "pm.test('issues session tokens', () => { pm.expect(d.accessToken).to.be.a('string'); pm.expect(d.refreshToken).to.be.a('string'); });",
+              "pm.collectionVariables.set('accessToken', d.accessToken);",
+              "pm.collectionVariables.set('refreshToken', d.refreshToken);"
+            ] } }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"phone\": \"{{regPhone}}\",\n  \"displayName\": \"Postman Ratepayer\",\n  \"email\": \"postman{{$timestamp}}@example.co.za\",\n  \"idNumber\": \"{{regIdNumber}}\",\n  \"registrationToken\": \"{{registrationToken}}\"\n}" },
+            "url": { "raw": "{{base}}/auth/register", "host": ["{{base}}"], "path": ["auth", "register"] },
+            "description": "Consumes the registrationToken, creates the phone-verified User (kycStatus PENDING), and issues the session token pair. idNumber must be a Luhn-valid 13-digit SA ID."
+          }
+        },
+        {
+          "name": "Session (new user)",
+          "event": [
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [
+              "pm.test('auth/session → 200', () => pm.response.to.have.status(200));",
+              "pm.test('kycStatus PENDING', () => pm.expect(pm.response.json().data.kycStatus).to.eql('PENDING'));"
+            ] } }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base}}/auth/session", "host": ["{{base}}"], "path": ["auth", "session"] },
+            "description": "App Launch — Token Check. 200 means the access token is valid."
+          }
+        },
+        {
+          "name": "Upload Proof of Address (KYC)",
+          "event": [
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [
+              "pm.test('auth/kyc → 201', () => pm.response.to.have.status(201));",
+              "pm.test('kycStatus SUBMITTED', () => pm.expect(pm.response.json().data.kycStatus).to.eql('SUBMITTED'));"
+            ] } }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": { "mode": "formdata", "formdata": [
+              { "key": "file", "type": "file", "src": [], "description": "Pick any PDF / JPEG / PNG (≤10 MB) — proof of address." }
+            ] },
+            "url": { "raw": "{{base}}/auth/kyc", "host": ["{{base}}"], "path": ["auth", "kyc"] },
+            "description": "Multipart proof-of-address upload → kycStatus SUBMITTED. SELECT A FILE in the body tab before sending (Postman cannot ship a binary inside the JSON collection)."
+          }
+        },
+        {
+          "name": "Login — Start (seeded user)",
+          "event": [
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [
+              "pm.test('login → 200 (anti-enumeration)', () => pm.response.to.have.status(200));",
+              "pm.test('identical body regardless of registration', () => pm.expect(pm.response.json().data.message).to.include('an OTP has been sent'));"
+            ] } }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"phone\": \"{{loginPhone}}\"\n}" },
+            "url": { "raw": "{{base}}/auth/login", "host": ["{{base}}"], "path": ["auth", "login"] },
+            "description": "OTP-only login for the seeded ratepayer (+27821234567), who owns the seeded property/bill/line-items the later stages drive. Always 200 (anti-enumeration)."
+          }
+        },
+        {
+          "name": "Verify Login OTP (LOGIN)",
+          "event": [
+            { "listen": "prerequest", "script": { "type": "text/javascript", "exec": [
+              "// Capture the LOGIN mockCode for the seeded phone via /otp/resend (retry past cooldown).",
+              "const base = pm.collectionVariables.get('base');",
+              "const phone = pm.collectionVariables.get('loginPhone');",
+              "function attempt(triesLeft) {",
+              "  pm.sendRequest({",
+              "    url: base + '/otp/resend',",
+              "    method: 'POST',",
+              "    header: { 'Content-Type': 'application/json' },",
+              "    body: { mode: 'raw', raw: JSON.stringify({ phone: phone, purpose: 'LOGIN' }) }",
+              "  }, function (err, res) {",
+              "    if (err) { return; }",
+              "    const j = res.json();",
+              "    if (j.data && j.data.mockCode) { pm.collectionVariables.set('loginOtpCode', j.data.mockCode); return; }",
+              "    const wait = (j.error && j.error.details && j.error.details.retryAfterSeconds) || 0;",
+              "    if (triesLeft > 0 && wait > 0) { setTimeout(() => attempt(triesLeft - 1), (wait + 1) * 1000); }",
+              "  });",
+              "}",
+              "attempt(2);"
+            ] } },
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [
+              "pm.test('otp/verify (LOGIN) → 200', () => pm.response.to.have.status(200));",
+              "const d = pm.response.json().data;",
+              "pm.test('issues session tokens', () => pm.expect(d.accessToken).to.be.a('string'));",
+              "pm.collectionVariables.set('accessToken', d.accessToken);",
+              "pm.collectionVariables.set('refreshToken', d.refreshToken);"
+            ] } }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"phone\": \"{{loginPhone}}\",\n  \"code\": \"{{loginOtpCode}}\"\n}" },
+            "url": { "raw": "{{base}}/otp/verify", "host": ["{{base}}"], "path": ["otp", "verify"] },
+            "description": "Verifies the LOGIN OTP → issues the session token pair for the seeded user. {{accessToken}} captured here drives every authenticated request below."
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Find Property",
+      "item": [
+        {
+          "name": "Search by Account Number",
+          "event": [
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [
+              "pm.test('property/search/account → 200', () => pm.response.to.have.status(200));",
+              "const p = pm.response.json().data.property;",
+              "pm.test('property found for the seeded account', () => { pm.expect(p).to.be.an('object'); pm.expect(p.accountNumber).to.eql(pm.collectionVariables.get('seedAccount')); });",
+              "pm.collectionVariables.set('propertyId', p.id);"
+            ] } }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"accountNumber\": \"{{seedAccount}}\"\n}" },
+            "url": { "raw": "{{base}}/property/search/account", "host": ["{{base}}"], "path": ["property", "search", "account"] },
+            "description": "Account-number lookup, gated by the identity gate (the property must be linked to the caller's ID hash). Captures {{propertyId}}."
+          }
+        },
+        {
+          "name": "Search by Address",
+          "event": [
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [
+              "pm.test('property/search/address → 200', () => pm.response.to.have.status(200));",
+              "pm.test('returns an array', () => pm.expect(pm.response.json().data).to.be.an('array'));"
+            ] } }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"q\": \"Vereeniging\"\n}" },
+            "url": { "raw": "{{base}}/property/search/address", "host": ["{{base}}"], "path": ["property", "search", "address"] },
+            "description": "Address search. Body is { q } (partial, case-insensitive) — exactly one of q | erfNumber. Identity-gate misses fold into []."
+          }
+        },
+        {
+          "name": "Property Detail",
+          "event": [
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [
+              "pm.test('property/:id → 200', () => pm.response.to.have.status(200));",
+              "pm.test('id matches', () => pm.expect(pm.response.json().data.id).to.eql(pm.collectionVariables.get('propertyId')));"
+            ] } }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base}}/property/{{propertyId}}", "host": ["{{base}}"], "path": ["property", "{{propertyId}}"] },
+            "description": "Full property detail. 403 on an identity-gate miss, 404 if no such id."
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Bill Review",
+      "item": [
+        {
+          "name": "List Bills",
+          "event": [
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [
+              "pm.test('bills → 200', () => pm.response.to.have.status(200));",
+              "const bills = pm.response.json().data;",
+              "pm.test('at least one bill', () => pm.expect(bills.length).to.be.above(0));",
+              "const seed = pm.collectionVariables.get('seedAccount');",
+              "const bill = bills.find(b => b.accountNumber === seed) || bills[0];",
+              "pm.collectionVariables.set('billId', bill.id);"
+            ] } }
+          ],
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base}}/bills", "host": ["{{base}}"], "path": ["bills"] }, "description": "All bills for the caller's service accounts. Captures {{billId}} (the seeded account's bill)." }
+        },
+        {
+          "name": "Bill Detail",
+          "event": [
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [
+              "pm.test('bills/:id → 200', () => pm.response.to.have.status(200));",
+              "pm.test('id matches', () => pm.expect(pm.response.json().data.id).to.eql(pm.collectionVariables.get('billId')));"
+            ] } }
+          ],
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base}}/bills/{{billId}}", "host": ["{{base}}"], "path": ["bills", "{{billId}}"] } }
+        },
+        {
+          "name": "Bill Lines",
+          "event": [
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [
+              "pm.test('bills/:id/lines → 200', () => pm.response.to.have.status(200));",
+              "const lines = pm.response.json().data.lineItems;",
+              "pm.test('has line items', () => pm.expect(lines.length).to.be.above(0));",
+              "// Prefer the anomaly-flagged line; keep ALL line ids (anomaly first) so the",
+              "// draft step can fall through to one not already disputed on re-runs.",
+              "const ordered = lines.filter(li => li.anomalyFlag).concat(lines.filter(li => !li.anomalyFlag));",
+              "pm.collectionVariables.set('lineItemId', ordered[0].id);",
+              "pm.collectionVariables.set('lineItemIds', JSON.stringify(ordered.map(li => li.id)));"
+            ] } }
+          ],
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base}}/bills/{{billId}}/lines", "host": ["{{base}}"], "path": ["bills", "{{billId}}", "lines"] }, "description": "Line-item breakdown. Captures {{lineItemId}} (the anomaly-flagged line) for the objection draft." }
+        },
+        {
+          "name": "Bill AI Estimate",
+          "event": [
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [
+              "pm.test('bills/:id/ai-estimate → 200', () => pm.response.to.have.status(200));",
+              "pm.test('has confidence', () => pm.expect(pm.response.json().data).to.have.property('confidence'));"
+            ] } }
+          ],
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base}}/bills/{{billId}}/ai-estimate", "host": ["{{base}}"], "path": ["bills", "{{billId}}", "ai-estimate"] }, "description": "AI expected-amount estimate. Below 0.85 confidence the estimate/variance are null (still 200)." }
+        }
+      ]
+    },
+    {
+      "name": "4. Evidence & Challenge",
+      "item": [
+        {
+          "name": "Save Objection Draft",
+          "event": [
+            { "listen": "prerequest", "script": { "type": "text/javascript", "exec": [
+              "// Re-runnable draft: the route returns 409 when a SUBMITTED objection",
+              "// already covers a charge. Pre-flight each candidate line item and pick",
+              "// the first that drafts cleanly, so prior runs don't block this one.",
+              "const base = pm.collectionVariables.get('base');",
+              "const token = pm.collectionVariables.get('accessToken');",
+              "let ids = [];",
+              "try { ids = JSON.parse(pm.collectionVariables.get('lineItemIds') || '[]'); } catch (e) {}",
+              "if (!ids.length) { ids = [pm.collectionVariables.get('lineItemId')]; }",
+              "function tryNext(i) {",
+              "  if (i >= ids.length) { return; }",
+              "  pm.sendRequest({",
+              "    url: base + '/objections/draft',",
+              "    method: 'POST',",
+              "    header: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },",
+              "    body: { mode: 'raw', raw: JSON.stringify({ lineItemIds: [ids[i]], category: 'WRONG_METER_READING', notes: 'The meter reading on this bill is far higher than my actual usage this period.' }) }",
+              "  }, function (err, res) {",
+              "    if (err) { return; }",
+              "    if (res.code === 200) { pm.collectionVariables.set('lineItemId', ids[i]); return; }",
+              "    if (res.code === 409) { return tryNext(i + 1); }",
+              "  });",
+              "}",
+              "tryNext(0);"
+            ] } },
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [
+              "pm.test('objections/draft → 200', () => pm.response.to.have.status(200));",
+              "const d = pm.response.json().data;",
+              "pm.test('DRAFT marker + objectionId', () => { pm.expect(d.status).to.eql('DRAFT'); pm.expect(d.objectionId).to.be.a('string'); });",
+              "pm.collectionVariables.set('objectionId', d.objectionId);"
+            ] } }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"lineItemIds\": [\"{{lineItemId}}\"],\n  \"category\": \"WRONG_METER_READING\",\n  \"notes\": \"The meter reading on this bill is far higher than my actual usage this period.\"\n}" },
+            "url": { "raw": "{{base}}/objections/draft", "host": ["{{base}}"], "path": ["objections", "draft"] },
+            "description": "UPSERT a draft objection. category ∈ WRONG_METER_READING | INCORRECT_TARIFF | PROPERTY_NOT_OCCUPIED | DUPLICATE_OTHER; notes 10–2000 chars. 409 if a SUBMITTED objection already covers the line item (re-seed or pick another line item if you hit this on re-runs). Captures {{objectionId}}."
+          }
+        },
+        {
+          "name": "Attach Evidence",
+          "event": [
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [
+              "pm.test('objections/:id/evidence → 201', () => pm.response.to.have.status(201));",
+              "pm.test('detected mimeType returned', () => pm.expect(pm.response.json().data.mimeType).to.be.a('string'));"
+            ] } }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": { "mode": "formdata", "formdata": [
+              { "key": "file", "type": "file", "src": [], "description": "Pick a real PDF / JPEG / PNG (≤10 MB). The server magic-byte validates it — a fake file with only the header bytes is rejected." },
+              { "key": "label", "value": "Meter photo", "type": "text" }
+            ] },
+            "url": { "raw": "{{base}}/objections/{{objectionId}}/evidence", "host": ["{{base}}"], "path": ["objections", "{{objectionId}}", "evidence"] },
+            "description": "Attach one evidence file (call repeatedly up to 5). SELECT A REAL IMAGE/PDF FILE in the body tab — the type is detected from magic bytes, not the header."
+          }
+        },
+        {
+          "name": "Check Evidence Sufficiency",
+          "event": [
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [
+              "pm.test('objections/:id/sufficiency → 200', () => pm.response.to.have.status(200));",
+              "pm.test('returns sufficient flag', () => pm.expect(pm.response.json().data).to.have.property('sufficient'));"
+            ] } }
+          ],
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base}}/objections/{{objectionId}}/sufficiency", "host": ["{{base}}"], "path": ["objections", "{{objectionId}}", "sufficiency"] }, "description": "Rule-based evidence sufficiency. true → Review Summary; false → Add More Evidence." }
+        }
+      ]
+    },
+    {
+      "name": "5. Submission",
+      "item": [
+        {
+          "name": "Review Summary",
+          "event": [
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [
+              "pm.test('objections/:id/summary → 200', () => pm.response.to.have.status(200));",
+              "const d = pm.response.json().data;",
+              "pm.test('summary for this objection', () => { pm.expect(d.objectionId).to.eql(pm.collectionVariables.get('objectionId')); pm.expect(d.disputedItems.length).to.be.above(0); });"
+            ] } }
+          ],
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base}}/objections/{{objectionId}}/summary", "host": ["{{base}}"], "path": ["objections", "{{objectionId}}", "summary"] } }
+        },
+        {
+          "name": "Submit Objection",
+          "event": [
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [
+              "pm.test('objections/:id/submit → 202 (async)', () => pm.response.to.have.status(202));",
+              "const d = pm.response.json().data;",
+              "pm.test('returns async job handle', () => { pm.expect(d.jobId).to.be.a('string'); pm.expect(d.statusUrl).to.include('status'); });"
+            ] } }
+          ],
+          "request": { "method": "POST", "header": [], "url": { "raw": "{{base}}/objections/{{objectionId}}/submit", "host": ["{{base}}"], "path": ["objections", "{{objectionId}}", "submit"] }, "description": "Async submission. 202 + jobId; an in-process worker assigns the refNumber (ELM-2026-NNNNNN) shortly after." }
+        },
+        {
+          "name": "Resolve refNumber (poll list)",
+          "event": [
+            { "listen": "prerequest", "script": { "type": "text/javascript", "exec": [
+              "// The refNumber is assigned asynchronously. Poll GET /objections (newest",
+              "// first) until our just-submitted objection has a refNumber, then store it.",
+              "const base = pm.collectionVariables.get('base');",
+              "const token = pm.collectionVariables.get('accessToken');",
+              "function poll(triesLeft) {",
+              "  pm.sendRequest({",
+              "    url: base + '/objections?pageSize=100',",
+              "    method: 'GET',",
+              "    header: { 'Authorization': 'Bearer ' + token }",
+              "  }, function (err, res) {",
+              "    if (err) { return; }",
+              "    const items = (res.json().data && res.json().data.items) || [];",
+              "    if (items.length && items[0].refNumber) { pm.collectionVariables.set('objectionRef', items[0].refNumber); return; }",
+              "    if (triesLeft > 0) { setTimeout(() => poll(triesLeft - 1), 500); }",
+              "  });",
+              "}",
+              "poll(20);"
+            ] } },
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [
+              "pm.test('objections (list) → 200', () => pm.response.to.have.status(200));",
+              "pm.test('refNumber captured', () => pm.expect(pm.collectionVariables.get('objectionRef')).to.match(/^ELM-2026-\\d{6}$/));"
+            ] } }
+          ],
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base}}/objections?pageSize=100", "host": ["{{base}}"], "path": ["objections"], "query": [{ "key": "pageSize", "value": "100" }] }, "description": "Tracking list. The pre-request script polls until the async worker has assigned this objection's refNumber → {{objectionRef}}." }
+        }
+      ]
+    },
+    {
+      "name": "6. Tracking & Resolution",
+      "item": [
+        {
+          "name": "Objection Status",
+          "event": [
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [
+              "pm.test('objections/:ref/status → 200', () => pm.response.to.have.status(200));",
+              "pm.test('UNDER_REVIEW', () => pm.expect(pm.response.json().data.status).to.eql('UNDER_REVIEW'));"
+            ] } }
+          ],
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base}}/objections/{{objectionRef}}/status", "host": ["{{base}}"], "path": ["objections", "{{objectionRef}}", "status"] }, "description": "Track Objection Status — timeline + municipality response (null until the municipality responds)." }
+        },
+        {
+          "name": "Municipality Webhook — MORE_INFO_REQUESTED",
+          "event": [
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [
+              "pm.test('municipality webhook → 200', () => pm.response.to.have.status(200));",
+              "const d = pm.response.json().data;",
+              "pm.test('status applied + notification queued', () => { pm.expect(d.status).to.eql('MORE_INFO_REQUESTED'); pm.expect(d.notificationQueued).to.eql(true); });"
+            ] } }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Municipal-Webhook-Secret", "value": "{{municipalSecret}}" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"status\": \"MORE_INFO_REQUESTED\",\n  \"note\": \"Please supply a clearer meter photo for verification.\",\n  \"resolvedBy\": \"clerk-postman\",\n  \"idempotencyKey\": \"pm-mir-{{$timestamp}}-{{$randomInt}}\"\n}" },
+            "url": { "raw": "{{base}}/municipality/objections/{{objectionRef}}/response", "host": ["{{base}}"], "path": ["municipality", "objections", "{{objectionRef}}", "response"] },
+            "description": "Inbound CRM webhook (NOT a JWT — uses X-Municipal-Webhook-Secret, set {{municipalSecret}} = MUNICIPAL_WEBHOOK_SECRET from .env). status ∈ UNDER_REVIEW | MORE_INFO_REQUESTED | UPHELD | REJECTED; note 10–1000 chars; idempotencyKey required."
+          }
+        },
+        {
+          "name": "Re-upload Evidence (auto → UNDER_REVIEW)",
+          "event": [
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [
+              "pm.test('evidence → 201', () => pm.response.to.have.status(201));"
+            ] } }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": { "mode": "formdata", "formdata": [
+              { "key": "file", "type": "file", "src": [], "description": "Pick a real PDF/JPEG/PNG — re-uploading while MORE_INFO_REQUESTED auto-transitions the objection back to UNDER_REVIEW." }
+            ] },
+            "url": { "raw": "{{base}}/objections/{{objectionId}}/evidence", "host": ["{{base}}"], "path": ["objections", "{{objectionId}}", "evidence"] },
+            "description": "A successful evidence upload while MORE_INFO_REQUESTED auto-transitions status → UNDER_REVIEW (no separate re-submit). SELECT A REAL FILE."
+          }
+        },
+        {
+          "name": "Municipality Webhook — UPHELD (+ adjustment)",
+          "event": [
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [
+              "pm.test('municipality webhook → 200', () => pm.response.to.have.status(200));",
+              "pm.test('UPHELD', () => pm.expect(pm.response.json().data.status).to.eql('UPHELD'));"
+            ] } }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Municipal-Webhook-Secret", "value": "{{municipalSecret}}" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"status\": \"UPHELD\",\n  \"note\": \"Meter photo confirms the over-estimate. Charge reduced to the corrected consumption.\",\n  \"adjustedAmount\": \"310.00\",\n  \"resolvedBy\": \"clerk-postman\",\n  \"idempotencyKey\": \"pm-upheld-{{$timestamp}}-{{$randomInt}}\"\n}" },
+            "url": { "raw": "{{base}}/municipality/objections/{{objectionRef}}/response", "host": ["{{base}}"], "path": ["municipality", "objections", "{{objectionRef}}", "response"] },
+            "description": "Final resolution: UPHELD with an adjustedAmount (terminal). adjustedAmount is a decimal string."
+          }
+        },
+        {
+          "name": "Objection Status (UPHELD)",
+          "event": [
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [
+              "pm.test('status → 200', () => pm.response.to.have.status(200));",
+              "const d = pm.response.json().data;",
+              "pm.test('UPHELD + adjustedAmount', () => { pm.expect(d.status).to.eql('UPHELD'); pm.expect(d.municipalityResponse.adjustedAmount).to.eql('310.00'); });"
+            ] } }
+          ],
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base}}/objections/{{objectionRef}}/status", "host": ["{{base}}"], "path": ["objections", "{{objectionRef}}", "status"] } }
+        },
+        {
+          "name": "Close Case",
+          "event": [
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [
+              "pm.test('objections/:ref/close → 200', () => pm.response.to.have.status(200));",
+              "pm.test('closed display flag', () => pm.expect(pm.response.json().data.closed).to.eql(true));"
+            ] } }
+          ],
+          "request": { "method": "POST", "header": [], "url": { "raw": "{{base}}/objections/{{objectionRef}}/close", "host": ["{{base}}"], "path": ["objections", "{{objectionRef}}", "close"] }, "description": "Close the case after an UPHELD decision. `closed` is a client display state, not an ObjectionStatus enum value. (POST /objections/:ref/escalate is the sibling appeal CTA, valid only after REJECTED.)" }
+        }
+      ]
+    },
+    {
+      "name": "7. Account & Settings",
+      "item": [
+        {
+          "name": "Profile",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('account/profile → 200', () => pm.response.to.have.status(200));",
+            "pm.test('masked fields', () => pm.expect(pm.response.json().data.phoneMasked).to.be.a('string'));"
+          ] } }],
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base}}/account/profile", "host": ["{{base}}"], "path": ["account", "profile"] } }
+        },
+        {
+          "name": "Linked Properties",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('account/properties → 200', () => pm.response.to.have.status(200));",
+            "pm.test('at least one linked property', () => pm.expect(pm.response.json().data.length).to.be.above(0));"
+          ] } }],
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base}}/account/properties", "host": ["{{base}}"], "path": ["account", "properties"] } }
+        },
+        {
+          "name": "Preferences (GET)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('account/preferences → 200', () => pm.response.to.have.status(200));",
+            "pm.test('has smsEnabled', () => pm.expect(pm.response.json().data).to.have.property('smsEnabled'));"
+          ] } }],
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base}}/account/preferences", "host": ["{{base}}"], "path": ["account", "preferences"] } }
+        },
+        {
+          "name": "Preferences (PUT)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('account/preferences PUT → 200', () => pm.response.to.have.status(200));",
+            "const d = pm.response.json().data;",
+            "pm.test('partial update applied', () => { pm.expect(d.emailEnabled).to.eql(false); pm.expect(d.language).to.eql('en'); });"
+          ] } }],
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"smsEnabled\": true,\n  \"pushEnabled\": true,\n  \"emailEnabled\": false,\n  \"language\": \"en\"\n}" },
+            "url": { "raw": "{{base}}/account/preferences", "host": ["{{base}}"], "path": ["account", "preferences"] },
+            "description": "Partial update — any subset of { smsEnabled, pushEnabled, emailEnabled, language ∈ en|zu|af|st }."
+          }
+        },
+        {
+          "name": "Notifications (list)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('notifications → 200', () => pm.response.to.have.status(200));",
+            "const items = pm.response.json().data.items;",
+            "if (items && items.length) { pm.collectionVariables.set('notificationId', items[0].id); }"
+          ] } }],
+          "request": { "method": "GET", "header": [], "url": { "raw": "{{base}}/notifications?pageSize=10", "host": ["{{base}}"], "path": ["notifications"], "query": [{ "key": "pageSize", "value": "10" }] }, "description": "Notification inbox (paginated). Captures {{notificationId}} for the mark-read step." }
+        },
+        {
+          "name": "Register Device Token",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('device-token → 200', () => pm.response.to.have.status(200));",
+            "pm.test('registered', () => pm.expect(pm.response.json().data.registered).to.eql(true));"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"deviceToken\": \"postman-fcm-{{$timestamp}}\",\n  \"platform\": \"ANDROID\"\n}" },
+            "url": { "raw": "{{base}}/notifications/device-token", "host": ["{{base}}"], "path": ["notifications", "device-token"] },
+            "description": "FCM device-token registration. Body is { deviceToken, platform ∈ ANDROID|IOS }."
+          }
+        },
+        {
+          "name": "Mark Notification Read",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('notifications/:id/read → 200', () => pm.response.to.have.status(200));",
+            "pm.test('read', () => pm.expect(pm.response.json().data.read).to.eql(true));"
+          ] } }],
+          "request": { "method": "POST", "header": [], "url": { "raw": "{{base}}/notifications/{{notificationId}}/read", "host": ["{{base}}"], "path": ["notifications", "{{notificationId}}", "read"] } }
+        },
+        {
+          "name": "Mark All Read",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('notifications/read-all → 200', () => pm.response.to.have.status(200));",
+            "pm.test('updatedCount returned', () => pm.expect(pm.response.json().data).to.have.property('updatedCount'));"
+          ] } }],
+          "request": { "method": "POST", "header": [], "url": { "raw": "{{base}}/notifications/read-all", "host": ["{{base}}"], "path": ["notifications", "read-all"] } }
+        },
+        {
+          "name": "Refresh Session",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('auth/refresh → 200', () => pm.response.to.have.status(200));",
+            "const d = pm.response.json().data;",
+            "pm.test('rotated tokens', () => { pm.expect(d.accessToken).to.be.a('string'); pm.expect(d.refreshToken).to.be.a('string'); });",
+            "pm.collectionVariables.set('accessToken', d.accessToken);",
+            "pm.collectionVariables.set('refreshToken', d.refreshToken);"
+          ] } }],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"refreshToken\": \"{{refreshToken}}\"\n}" },
+            "url": { "raw": "{{base}}/auth/refresh", "host": ["{{base}}"], "path": ["auth", "refresh"] },
+            "description": "Rotates the refresh token (single-use). Updates {{accessToken}} + {{refreshToken}}."
+          }
+        },
+        {
+          "name": "Log Out",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('auth/logout → 200', () => pm.response.to.have.status(200));",
+            "pm.test('logged out', () => pm.expect(pm.response.json().data.message).to.eql('Logged out.'));"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"refreshToken\": \"{{refreshToken}}\"\n}" },
+            "url": { "raw": "{{base}}/auth/logout", "host": ["{{base}}"], "path": ["auth", "logout"] },
+            "description": "Revokes the refresh token. Run LAST — it ends the session."
+          }
+        }
+      ]
+    }
+  ]
+}

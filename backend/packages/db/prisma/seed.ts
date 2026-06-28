@@ -243,6 +243,30 @@ async function main(): Promise<void> {
     });
   }
 
+  // 5c. Fixture reset for the harness — clear any objections the e2e / Postman
+  //     runs created on THIS seed user (everything except the canonical
+  //     ELM-2026-000001), plus their child rows, so the smoke tests stay
+  //     re-runnable: each run disputes a fresh line item, and a submitted
+  //     objection permanently blocks re-disputing its charge. Scoped to the
+  //     seed user's non-canonical objections only — never touches other data.
+  const staleObjections = await prisma.objection.findMany({
+    where: { userId: user.id, refNumber: { not: "ELM-2026-000001" } },
+    select: { id: true },
+  });
+  if (staleObjections.length > 0) {
+    const ids = staleObjections.map((o) => o.id);
+    await prisma.municipalityResponse.deleteMany({
+      where: { objectionId: { in: ids } },
+    });
+    await prisma.evidenceFile.deleteMany({ where: { objectionId: { in: ids } } });
+    await prisma.notification.deleteMany({ where: { objectionId: { in: ids } } });
+    await prisma.objection.deleteMany({ where: { id: { in: ids } } });
+    await prisma.objectionDraft.deleteMany({ where: { userId: user.id } });
+    console.log(
+      `[seed] fixture reset: removed ${ids.length} harness objection(s) for the seed user.`,
+    );
+  }
+
   // 6. Objection on the flagged water line item (UNDER_REVIEW)
   const waterLine = await prisma.billLineItem.findFirst({
     where: { billId: bill.id, category: "WATER" },

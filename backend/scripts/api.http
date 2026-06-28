@@ -1,0 +1,351 @@
+###############################################################################
+# EasyRates — Mobile Customer Journey (VS Code REST Client)
+#
+# Walks the FULL EasyRates customer journey against the live gateway
+# (single origin {{base}}). Folders mirror the seven Figma stages:
+# Onboarding · Find Property · Bill Review · Evidence & Challenge · Submission ·
+# Tracking & Resolution · Account & Settings.
+#
+# HOW TO RUN
+#   1. Boot the stack in mock mode:  pnpm dev:mock   (OTP_MOCK=true)
+#   2. Postgres (easyrates_dev, seeded) + Redis up.
+#   3. Install the "REST Client" VS Code extension (humao.rest-client).
+#   4. Send requests top-to-bottom with the "Send Request" CodeLens. Each
+#      response's captured values feed the next request via @-variables that you
+#      paste from the response (REST Client shows the JSON; copy the token / id).
+#
+# OTP IN MOCK MODE. register/start and login dispatch the OTP server-to-server
+# and DO NOT echo the code. Two ways to read the plaintext code:
+#   (a) Watch the otp-service stdout from `pnpm dev:mock`:
+#         [otp][mock] code for <phone> (<PURPOSE>): <code>
+#   (b) Call POST /otp/resend below — in mock mode it returns `mockCode` in the
+#       response body. (Resend has a 30s cooldown once a live record exists.)
+#   Paste the 6-digit code into @otpCode / @loginOtpCode before sending Verify.
+#
+# Replace the @accessToken / @refreshToken / @registrationToken / @objectionId /
+# @objectionRef / @billId / @propertyId / @lineItemId placeholders with the
+# values you copy from earlier responses (REST Client does not auto-chain across
+# files; this is the manual analogue of the Postman test scripts).
+#
+# DELIBERATELY OUT OF SCOPE (absent from the backend): Forgot-Password / reset
+# (auth is passwordless OTP-only, ADR-002), WhatsApp onboarding, payments.
+###############################################################################
+
+@base = http://localhost:8080/api/v1
+
+# Seed data (packages/db/prisma/seed.ts)
+@loginPhone = +27821234567
+@seedAccount = 10045821
+# Luhn-valid 13-digit SA ID for the NEW registrant (distinct from the seed holder)
+@regIdNumber = 8507158001087
+# A fresh registrant phone — bump the last digits each run to stay re-runnable.
+@regPhone = +27780000001
+# Fill from backend/.env (KEY only): MUNICIPAL_WEBHOOK_SECRET
+@municipalSecret = REPLACE_WITH_MUNICIPAL_WEBHOOK_SECRET
+
+# ---- values to copy from responses as you go --------------------------------
+@otpCode = 000000
+@loginOtpCode = 000000
+@registrationToken = paste_from_otp_verify_REGISTRATION
+@accessToken = paste_from_otp_verify_LOGIN
+@refreshToken = paste_from_otp_verify_LOGIN
+@propertyId = paste_from_property_search
+@billId = paste_from_bills_list
+@lineItemId = paste_from_bill_lines
+@objectionId = paste_from_objection_draft
+@objectionRef = paste_from_objections_list
+
+
+###############################################################################
+# 1. ONBOARDING
+###############################################################################
+
+### Register — Start (202; dispatches a REGISTRATION OTP, creates no User)
+POST {{base}}/auth/register/start
+Content-Type: application/json
+
+{ "phone": "{{regPhone}}" }
+
+### Get the REGISTRATION mock code (mock mode returns `mockCode`)
+# Copy data.mockCode → @otpCode above. (Or read it from the dev:mock otp log.)
+POST {{base}}/otp/resend
+Content-Type: application/json
+
+{ "phone": "{{regPhone}}", "purpose": "REGISTRATION" }
+
+### Verify Phone OTP (REGISTRATION) → registrationToken
+# Copy data.registrationToken → @registrationToken above.
+POST {{base}}/otp/verify
+Content-Type: application/json
+
+{ "phone": "{{regPhone}}", "code": "{{otpCode}}" }
+
+### Register → 201 + session tokens
+POST {{base}}/auth/register
+Content-Type: application/json
+
+{
+  "phone": "{{regPhone}}",
+  "displayName": "REST Client Ratepayer",
+  "email": "restclient@example.co.za",
+  "idNumber": "{{regIdNumber}}",
+  "registrationToken": "{{registrationToken}}"
+}
+
+### Session check (new user) — expect kycStatus PENDING
+# Use the accessToken from Register's response.
+GET {{base}}/auth/session
+Authorization: Bearer {{accessToken}}
+
+### Upload Proof of Address (KYC, multipart) → kycStatus SUBMITTED
+# Point the path at any local PDF/JPEG/PNG ≤ 10 MB.
+POST {{base}}/auth/kyc
+Authorization: Bearer {{accessToken}}
+Content-Type: multipart/form-data; boundary=----restclientboundary
+
+------restclientboundary
+Content-Disposition: form-data; name="file"; filename="proof.pdf"
+Content-Type: application/pdf
+
+< ./proof.pdf
+------restclientboundary--
+
+
+###############################################################################
+# Log in as the SEEDED ratepayer (owns the seeded property/bill/line-items)
+###############################################################################
+
+### Login — Start (always 200, anti-enumeration)
+POST {{base}}/auth/login
+Content-Type: application/json
+
+{ "phone": "{{loginPhone}}" }
+
+### Get the LOGIN mock code
+# Copy data.mockCode → @loginOtpCode above. (Or read the dev:mock otp log.)
+POST {{base}}/otp/resend
+Content-Type: application/json
+
+{ "phone": "{{loginPhone}}", "purpose": "LOGIN" }
+
+### Verify Login OTP → AuthTokenResponse
+# Copy data.accessToken → @accessToken and data.refreshToken → @refreshToken.
+POST {{base}}/otp/verify
+Content-Type: application/json
+
+{ "phone": "{{loginPhone}}", "code": "{{loginOtpCode}}" }
+
+
+###############################################################################
+# 2. FIND PROPERTY
+###############################################################################
+
+### Search by account number (copy data.property.id → @propertyId)
+POST {{base}}/property/search/account
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "accountNumber": "{{seedAccount}}" }
+
+### Search by address (body is { q } or { erfNumber } — exactly one)
+POST {{base}}/property/search/address
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "q": "Vereeniging" }
+
+### Property detail
+GET {{base}}/property/{{propertyId}}
+Authorization: Bearer {{accessToken}}
+
+
+###############################################################################
+# 3. BILL REVIEW
+###############################################################################
+
+### List bills (copy a data[].id → @billId)
+GET {{base}}/bills
+Authorization: Bearer {{accessToken}}
+
+### Bill detail
+GET {{base}}/bills/{{billId}}
+Authorization: Bearer {{accessToken}}
+
+### Bill lines (copy an anomalyFlag line's id → @lineItemId)
+GET {{base}}/bills/{{billId}}/lines
+Authorization: Bearer {{accessToken}}
+
+### Bill AI estimate
+GET {{base}}/bills/{{billId}}/ai-estimate
+Authorization: Bearer {{accessToken}}
+
+
+###############################################################################
+# 4. EVIDENCE & CHALLENGE
+###############################################################################
+
+### Save objection draft (copy data.objectionId → @objectionId)
+# category ∈ WRONG_METER_READING | INCORRECT_TARIFF | PROPERTY_NOT_OCCUPIED | DUPLICATE_OTHER
+# notes 10–2000 chars. 409 if a SUBMITTED objection already covers this line item.
+POST {{base}}/objections/draft
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "lineItemIds": ["{{lineItemId}}"],
+  "category": "WRONG_METER_READING",
+  "notes": "The meter reading on this bill is far higher than my actual usage this period."
+}
+
+### Attach evidence (multipart; magic-byte validated — use a REAL PNG/JPEG/PDF)
+POST {{base}}/objections/{{objectionId}}/evidence
+Authorization: Bearer {{accessToken}}
+Content-Type: multipart/form-data; boundary=----restclientboundary
+
+------restclientboundary
+Content-Disposition: form-data; name="file"; filename="meter.png"
+Content-Type: image/png
+
+< ./meter.png
+------restclientboundary
+Content-Disposition: form-data; name="label"
+
+Meter photo
+------restclientboundary--
+
+### Check evidence sufficiency
+GET {{base}}/objections/{{objectionId}}/sufficiency
+Authorization: Bearer {{accessToken}}
+
+
+###############################################################################
+# 5. SUBMISSION
+###############################################################################
+
+### Review summary
+GET {{base}}/objections/{{objectionId}}/summary
+Authorization: Bearer {{accessToken}}
+
+### Submit objection (202 async — an in-process worker assigns the refNumber)
+POST {{base}}/objections/{{objectionId}}/submit
+Authorization: Bearer {{accessToken}}
+
+### List objections — the newest item's refNumber is the one just submitted
+# Copy data.items[0].refNumber → @objectionRef (poll a few times if still empty).
+GET {{base}}/objections?pageSize=100
+Authorization: Bearer {{accessToken}}
+
+
+###############################################################################
+# 6. TRACKING & RESOLUTION
+###############################################################################
+
+### Objection status (expect UNDER_REVIEW)
+GET {{base}}/objections/{{objectionRef}}/status
+Authorization: Bearer {{accessToken}}
+
+### Municipality webhook — MORE_INFO_REQUESTED (X-Municipal-Webhook-Secret, NOT a JWT)
+# status ∈ UNDER_REVIEW | MORE_INFO_REQUESTED | UPHELD | REJECTED; note 10–1000 chars.
+POST {{base}}/municipality/objections/{{objectionRef}}/response
+Content-Type: application/json
+X-Municipal-Webhook-Secret: {{municipalSecret}}
+
+{
+  "status": "MORE_INFO_REQUESTED",
+  "note": "Please supply a clearer meter photo for verification.",
+  "resolvedBy": "clerk-restclient",
+  "idempotencyKey": "rc-mir-0001"
+}
+
+### Re-upload evidence while MORE_INFO_REQUESTED → auto-transitions to UNDER_REVIEW
+POST {{base}}/objections/{{objectionId}}/evidence
+Authorization: Bearer {{accessToken}}
+Content-Type: multipart/form-data; boundary=----restclientboundary
+
+------restclientboundary
+Content-Disposition: form-data; name="file"; filename="meter2.png"
+Content-Type: image/png
+
+< ./meter.png
+------restclientboundary--
+
+### Municipality webhook — UPHELD with an adjustment (terminal)
+POST {{base}}/municipality/objections/{{objectionRef}}/response
+Content-Type: application/json
+X-Municipal-Webhook-Secret: {{municipalSecret}}
+
+{
+  "status": "UPHELD",
+  "note": "Meter photo confirms the over-estimate. Charge reduced to the corrected consumption.",
+  "adjustedAmount": "310.00",
+  "resolvedBy": "clerk-restclient",
+  "idempotencyKey": "rc-upheld-0001"
+}
+
+### Objection status (expect UPHELD + adjustedAmount)
+GET {{base}}/objections/{{objectionRef}}/status
+Authorization: Bearer {{accessToken}}
+
+### Close case after UPHELD (`closed` is a client display state)
+POST {{base}}/objections/{{objectionRef}}/close
+Authorization: Bearer {{accessToken}}
+
+### (Sibling) Escalate — appeal; valid ONLY after a REJECTED decision (else 409)
+POST {{base}}/objections/{{objectionRef}}/escalate
+Authorization: Bearer {{accessToken}}
+
+
+###############################################################################
+# 7. ACCOUNT & SETTINGS
+###############################################################################
+
+### Profile (masked)
+GET {{base}}/account/profile
+Authorization: Bearer {{accessToken}}
+
+### Linked properties
+GET {{base}}/account/properties
+Authorization: Bearer {{accessToken}}
+
+### Preferences (GET)
+GET {{base}}/account/preferences
+Authorization: Bearer {{accessToken}}
+
+### Preferences (PUT, partial — language ∈ en|zu|af|st)
+PUT {{base}}/account/preferences
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "smsEnabled": true, "pushEnabled": true, "emailEnabled": false, "language": "en" }
+
+### Notifications inbox
+GET {{base}}/notifications?pageSize=10
+Authorization: Bearer {{accessToken}}
+
+### Register device token (platform ∈ ANDROID|IOS)
+POST {{base}}/notifications/device-token
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "deviceToken": "rest-client-fcm-token", "platform": "ANDROID" }
+
+### Mark one notification read (replace :id with a real notification id)
+POST {{base}}/notifications/NOTIFICATION_ID_HERE/read
+Authorization: Bearer {{accessToken}}
+
+### Mark all read
+POST {{base}}/notifications/read-all
+Authorization: Bearer {{accessToken}}
+
+### Refresh session (rotates the refresh token)
+POST {{base}}/auth/refresh
+Content-Type: application/json
+
+{ "refreshToken": "{{refreshToken}}" }
+
+### Log out (revokes the refresh token — run LAST)
+POST {{base}}/auth/logout
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{ "refreshToken": "{{refreshToken}}" }
